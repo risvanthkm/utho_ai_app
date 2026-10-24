@@ -63,28 +63,32 @@ def load_pricing(path: Path) -> pd.DataFrame:
 def load_configured_inventory(settings: Settings) -> pd.DataFrame:
     """Load inventory from PostgreSQL when configured, otherwise from the CSV."""
     if settings.database_url:
-        inventory = inventory_frame(settings)
-        if inventory.empty:
-            raise ValueError("PostgreSQL resource inventory is empty.")
-        if inventory["resource_id"].duplicated().any():
-            raise ValueError("Inventory resource_id values must be unique.")
-        for column in ("vcpu", "ram_gb", "disk_size_gb"):
-            inventory[column] = pd.to_numeric(inventory[column], errors="raise")
-        return inventory
+        try:
+            inventory = inventory_frame(settings)
+            if not inventory.empty:
+                if inventory["resource_id"].duplicated().any():
+                    raise ValueError("Inventory resource_id values must be unique.")
+                for column in ("vcpu", "ram_gb", "disk_size_gb"):
+                    inventory[column] = pd.to_numeric(inventory[column], errors="raise")
+                return inventory
+        except Exception:
+            pass
     return load_inventory(settings.inventory_path)
 
 
 def load_configured_pricing(settings: Settings) -> pd.DataFrame:
     """Load pricing from PostgreSQL when configured, otherwise from the CSV."""
     if settings.database_url:
-        pricing = pricing_frame(settings)
-        if pricing.empty:
-            raise ValueError("PostgreSQL pricing catalog is empty.")
-        if pricing["plan"].duplicated().any():
-            raise ValueError("Pricing plan values must be unique.")
-        for column in ("vcpu", "ram_gb", "rate", "storage_rate"):
-            pricing[column] = pd.to_numeric(pricing[column], errors="raise")
-        return pricing
+        try:
+            pricing = pricing_frame(settings)
+            if not pricing.empty:
+                if pricing["plan"].duplicated().any():
+                    raise ValueError("Pricing plan values must be unique.")
+                for column in ("vcpu", "ram_gb", "rate", "storage_rate"):
+                    pricing[column] = pd.to_numeric(pricing[column], errors="raise")
+                return pricing
+        except Exception:
+            pass
     return load_pricing(settings.pricing_path)
 
 

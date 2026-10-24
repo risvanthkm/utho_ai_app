@@ -2,7 +2,8 @@ FROM python:3.11-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    PIP_NO_CACHE_DIR=1
+    PIP_NO_CACHE_DIR=1 \
+    PORT=8001
 
 WORKDIR /app
 
@@ -12,11 +13,15 @@ RUN python -m pip install --upgrade pip \
     && python -m pip install -r requirements.txt
 
 COPY app ./app
+COPY db ./db
 COPY datasets/raw/inventory.csv ./datasets/raw/inventory.csv
 COPY datasets/raw/pricing.csv ./datasets/raw/pricing.csv
 
 RUN mkdir -p /app/models/tft
 
-EXPOSE 8000
+EXPOSE 8001
 
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+HEALTHCHECK --interval=10s --timeout=4s --start-period=15s --retries=5 \
+    CMD python -c "import os, urllib.request; port = os.getenv('PORT', '8001'); urllib.request.urlopen(f'http://127.0.0.1:{port}/health', timeout=3)" || exit 1
+
+CMD ["sh", "-c", "uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8001}"]

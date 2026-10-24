@@ -1,5 +1,11 @@
+name: smartcloud-finops
+
 services:
-  db:
+  # ---------------------------------------------------------------------------
+  # 1. TimescaleDB (PostgreSQL 16 with TimescaleDB Hypertable extension)
+  # ---------------------------------------------------------------------------
+  timescale-db:
+    container_name: timescale-db
     image: timescale/timescaledb:2.17.2-pg16
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-resource_advisor}
@@ -15,21 +21,29 @@ services:
       interval: 5s
       timeout: 5s
       retries: 20
+    networks:
+      - smartcloud-net
     restart: unless-stopped
 
-  api:
+  # ---------------------------------------------------------------------------
+  # 2. Python AI & ML Engine (:8001) with Chatbot & TimescaleDB Telemetry
+  # ---------------------------------------------------------------------------
+  utho-ai:
+    container_name: utho-ai
     build:
       context: .
       dockerfile: Dockerfile
     ports:
-      - "${API_PORT:-8000}:8000"
+      - "${AI_PORT:-8001}:8001"
     environment:
+      PORT: "8001"
+      DATABASE_URL: postgresql://${POSTGRES_USER:-resource_advisor}:${POSTGRES_PASSWORD:-change-this-local-password}@timescale-db:5432/${POSTGRES_DB:-resource_advisor}
+      GO_BACKEND_URL: "http://utho-backend:8080"
       INVENTORY_PATH: /app/datasets/raw/inventory.csv
       PRICING_PATH: /app/datasets/raw/pricing.csv
       TELEMETRY_PATH: /app/datasets/raw/telemetry.parquet
       MODEL_DIR: /app/models/tft
-      DATABASE_URL: ${DATABASE_URL:-postgresql://${POSTGRES_USER:-resource_advisor}:${POSTGRES_PASSWORD:-change-this-local-password}@db:5432/${POSTGRES_DB:-resource_advisor}}
-      AWS_REGION: ${AWS_REGION:-us-east-1}
+      AWS_REGION: ${AWS_REGION:-in-mumbai-1}
       GOOGLE_API_KEY: ${GOOGLE_API_KEY:-}
       GOOGLE_MODEL: ${GOOGLE_MODEL:-gemini-2.5-flash}
       TYPESAFE_API_KEY: ${TYPESAFE_API_KEY:-}
@@ -37,16 +51,26 @@ services:
       WATTS_PER_VCPU_IDLE: ${WATTS_PER_VCPU_IDLE:-5}
       WATTS_PER_VCPU_FULL: ${WATTS_PER_VCPU_FULL:-15}
       DATA_CENTER_PUE: ${DATA_CENTER_PUE:-1.4}
-      GRID_CARBON_KG_PER_KWH: ${GRID_CARBON_KG_PER_KWH:-0.4}
+      GRID_CARBON_KG_PER_KWH: ${GRID_CARBON_KG_PER_KWH:-0.71}
     volumes:
       - ./datasets/raw:/app/datasets/raw:ro
       - model_data:/app/models
     depends_on:
-      db:
+      timescale-db:
         condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8001/health', timeout=3)"]
+      interval: 10s
+      timeout: 4s
+      retries: 5
+      start_period: 15s
+    networks:
+      - smartcloud-net
     restart: unless-stopped
 
+  # Optional one-shot seed job for standalone testing
   seed:
+    container_name: utho-ai-seed
     build:
       context: .
       dockerfile: Dockerfile
@@ -55,13 +79,70 @@ services:
       INVENTORY_PATH: /app/datasets/raw/inventory.csv
       PRICING_PATH: /app/datasets/raw/pricing.csv
       TELEMETRY_PATH: /app/datasets/raw/telemetry.parquet
-      DATABASE_URL: ${DATABASE_URL:-postgresql://${POSTGRES_USER:-resource_advisor}:${POSTGRES_PASSWORD:-change-this-local-password}@db:5432/${POSTGRES_DB:-resource_advisor}}
+      DATABASE_URL: postgresql://${POSTGRES_USER:-resource_advisor}:${POSTGRES_PASSWORD:-change-this-local-password}@timescale-db:5432/${POSTGRES_DB:-resource_advisor}
     volumes:
       - ./datasets/raw:/app/datasets/raw:ro
     depends_on:
-      db:
+      timescale-db:
         condition: service_healthy
+    networks:
+      - smartcloud-net
     profiles: ["seed"]
+
+  # ---------------------------------------------------------------------------
+  # 3. Go FinOps Core Engine & Unified API Gateway (:8080)
+  # ---------------------------------------------------------------------------
+  utho-backend:
+    container_name: utho-backend
+    build:
+      context: ${BACKEND_PATH:-../utho_backend}
+      dockerfile: Dockerfile
+    ports:
+      - "${BACKEND_PORT:-8080}:8080"
+    environment:
+      PORT: "8080"
+      PYTHON_AI_URL: "http://utho-ai:8001"
+    depends_on:
+      utho-ai:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8080/healthz >/dev/null || exit 1"]
+      interval: 10s
+      timeout: 4s
+      retries: 5
+      start_period: 5s
+    networks:
+      - smartcloud-net
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------------
+  # 4. React + TypeScript Glassmorphic FinOps Console (:5173 -> Nginx :80)
+  # ---------------------------------------------------------------------------
+  utho-frontend:
+    container_name: utho-frontend
+    build:
+      context: ${FRONTEND_PATH:-../utho_frontend}
+      dockerfile: Dockerfile
+      args:
+        VITE_API_BASE_URL: ${VITE_API_BASE_URL:-/api/v1}
+    ports:
+      - "${FRONTEND_PORT:-5173}:80"
+    depends_on:
+      utho-backend:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:80/ >/dev/null || exit 1"]
+      interval: 10s
+      timeout: 4s
+      retries: 5
+      start_period: 5s
+    networks:
+      - smartcloud-net
+    restart: unless-stopped
+
+networks:
+  smartcloud-net:
+    driver: bridge
 
 volumes:
   postgres_data:
