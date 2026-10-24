@@ -1,0 +1,8 @@
+plan,type,vcpu,ram_gb,rate,storage_rate
+t3.small,VM,2,2,0.0208,0.0
+t3.medium,VM,2,4,0.0416,0.0
+m5.large,VM,2,8,0.096,0.0
+c5.2xlarge,VM,8,16,0.34,0.0
+r5.2xlarge,VM,8,64,0.504,0.0
+gp3,block_volume,0,0,0.0,0.08
+elastic_ip,public_ip,0,0,0.005,0.0

@@ -1,0 +1,19 @@
+.venv/
+__pycache__/
+.pytest_cache/
+.coverage
+.env
+*.py[cod]
+
+# Generated telemetry and model artifacts
+datasets/raw/telemetry.parquet
+datasets/generated/*
+!datasets/generated/.gitkeep
+models/*
+!models/.gitkeep
+
+# Runtime logs and generated files
+*.log
+lightning_logs/
+forecast_output/
+outputs/
