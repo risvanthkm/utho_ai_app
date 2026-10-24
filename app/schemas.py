@@ -28,6 +28,22 @@ class RecommendationRequest(APIModel):
     headroom: float = Field(default=1.30, ge=1.0, le=3.0)
 
 
+class DashboardRecommendationRequest(APIModel):
+    hours: int = Field(default=24 * 30, ge=1, le=24 * 90)
+    peak_percentile: Literal[95, 99] = 99
+    headroom: float = Field(default=1.30, ge=1.0, le=3.0)
+    region: str | None = None
+    environment: str | None = None
+    team: str | None = None
+
+
+class JevRiskRequest(APIModel):
+    resource_id: str = Field(min_length=1, max_length=128)
+    hours: int = Field(default=24 * 30, ge=1, le=24 * 90)
+    peak_percentile: Literal[95, 99] = 99
+    headroom: float = Field(default=1.30, ge=1.0, le=3.0)
+
+
 class CostForecastRequest(APIModel):
     days: Literal[30, 60, 90] = 30
     headroom: float = Field(default=1.30, ge=1.0, le=3.0)

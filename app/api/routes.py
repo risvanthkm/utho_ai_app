@@ -5,19 +5,28 @@ from __future__ import annotations
 from typing import Any
 
 import pandas as pd
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query
 from starlette.concurrency import run_in_threadpool
 
 from app.config import settings
 from app.data import inventory_records, load_inventory, load_pricing
 from app.schemas import (
     CostForecastRequest,
+    DashboardRecommendationRequest,
     DescriptionRequest,
     ForecastRequest,
+    JevRiskRequest,
     RecommendationRequest,
     ScenarioRequest,
     TerraformRequest,
     TrainRequest,
+)
+from app.services.dashboard import (
+    actionable_recommendations,
+    dashboard_alerts,
+    dashboard_resources,
+    dashboard_summary,
+    resource_history,
 )
 from app.services.descriptions import generate_description
 from app.services.forecasting import (
@@ -25,6 +34,7 @@ from app.services.forecasting import (
     train_models,
     trained_prediction_hours,
 )
+from app.services.jev import assess_recommendation
 from app.services.optimization import build_recommendations, inventory_costs
 from app.services.scenarios import parse_scenario_text, simulate_scenario
 from app.services.sustainability import estimate_sustainability
@@ -90,6 +100,116 @@ def list_resources() -> dict[str, Any]:
         inventory = load_inventory(settings.inventory_path)
         return {"count": len(inventory), "resources": inventory_records(inventory)}
     except (FileNotFoundError, ValueError) as exc:
+        raise _http_error(exc) from exc
+
+
+@router.get("/dashboard/summary")
+def get_dashboard_summary(
+    hours: int = Query(default=720, ge=1, le=2160),
+    region: str | None = None,
+    environment: str | None = None,
+    team: str | None = None,
+) -> dict[str, Any]:
+    try:
+        return dashboard_summary(settings, hours, region, environment, team)
+    except (FileNotFoundError, ValueError, RuntimeError, KeyError) as exc:
+        raise _http_error(exc) from exc
+
+
+@router.get("/dashboard/resources")
+def get_dashboard_resources(
+    hours: int = Query(default=720, ge=1, le=2160),
+    region: str | None = None,
+    environment: str | None = None,
+    team: str | None = None,
+) -> dict[str, Any]:
+    try:
+        return dashboard_resources(settings, hours, region, environment, team)
+    except (FileNotFoundError, ValueError, RuntimeError, KeyError) as exc:
+        raise _http_error(exc) from exc
+
+
+@router.get("/resources/{resource_id}/history")
+def get_resource_history(
+    resource_id: str,
+    hours: int = Query(default=168, ge=1, le=2160),
+    interval_minutes: int = Query(default=60),
+) -> dict[str, Any]:
+    try:
+        return resource_history(settings, resource_id, hours, interval_minutes)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except (FileNotFoundError, ValueError, RuntimeError) as exc:
+        raise _http_error(exc) from exc
+
+
+@router.post("/optimization/actionable")
+def get_actionable_recommendations(
+    request: DashboardRecommendationRequest,
+) -> dict[str, Any]:
+    try:
+        return actionable_recommendations(
+            settings,
+            request.hours,
+            request.peak_percentile,
+            request.headroom,
+            request.region,
+            request.environment,
+            request.team,
+        )
+    except (FileNotFoundError, ValueError, RuntimeError, KeyError) as exc:
+        raise _http_error(exc) from exc
+
+
+@router.post("/optimization/jev-risk")
+def get_jev_risk_assessment(request: JevRiskRequest) -> dict[str, Any]:
+    try:
+        recommendations = actionable_recommendations(
+            settings,
+            request.hours,
+            request.peak_percentile,
+            request.headroom,
+        )["recommendations"]
+        resource_recommendations = [
+            item for item in recommendations if item["resource_id"] == request.resource_id
+        ]
+        if not resource_recommendations:
+            raise HTTPException(
+                status_code=404,
+                detail=f"No rightsizing recommendation found for {request.resource_id}.",
+            )
+        primary = resource_recommendations[0]
+        return {
+            "resource_id": request.resource_id,
+            "deterministic_recommendation": primary,
+            "jev_assessment": assess_recommendation(settings, primary),
+        }
+    except HTTPException:
+        raise
+    except (FileNotFoundError, ValueError, RuntimeError, KeyError) as exc:
+        raise _http_error(exc) from exc
+
+
+@router.get("/alerts")
+def get_dashboard_alerts(
+    hours: int = Query(default=720, ge=1, le=2160),
+    region: str | None = None,
+    environment: str | None = None,
+    team: str | None = None,
+    monthly_budget_usd: float | None = Query(default=None, ge=0),
+    previous_month_cost_usd: float | None = Query(default=None, ge=0),
+) -> dict[str, Any]:
+    try:
+        return dashboard_alerts(
+            settings,
+            hours,
+            region,
+            environment,
+            team,
+            monthly_budget_usd,
+            previous_month_cost_usd,
+        )
+    except (FileNotFoundError, ValueError, RuntimeError, KeyError) as exc:
         raise _http_error(exc) from exc
 
 

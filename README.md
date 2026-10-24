@@ -25,6 +25,8 @@ app/
     scenarios.py            Shutdown what-if simulation
     sustainability.py       Energy/carbon estimates
     terraform.py            Terraform text generation
+    dashboard.py            Dashboard metrics, historical percentiles, alerts
+    jev.py                  Optional TypeSafe Jev risk assessment
 datasets/
   raw/                      Put input inventory, pricing, and telemetry here
   generated/                Optional local/generated data; ignored by Git
@@ -63,6 +65,35 @@ uvicorn app.main:app --reload --env-file .env
 Open interactive API docs at `http://127.0.0.1:8000/docs`; health check is
 `GET /api/v1/health`.
 
+## Run with Docker Compose
+
+Install Docker Engine and the Docker Compose plugin. Keep your inventory,
+pricing, and telemetry files in `datasets/raw/`; Compose mounts this directory
+read-only into the container, so large or private telemetry is not copied into
+the image. The trained model is saved in a persistent Docker volume.
+
+```bash
+cp .env.example .env
+docker compose up --build
+```
+
+The API is available at `http://localhost:8000/docs`. To use another host port,
+set `API_PORT` in `.env`. Optional Google AI and TypeSafe credentials can also
+be configured there. Stop the service with `docker compose down`; model
+checkpoints remain in the volume. To remove them as well, run
+`docker compose down --volumes`.
+
+To build and run the API image without Compose, first ensure the configured
+datasets exist in `datasets/raw/`, then run:
+
+```bash
+docker build -t cloud-resource-advisor .
+docker run --rm -p 8000:8000 \
+  -v "$PWD/datasets/raw:/app/datasets/raw:ro" \
+  -v cloud-resource-advisor-models:/app/models \
+  cloud-resource-advisor
+```
+
 ## Dataset contracts
 
 Inventory is one row per resource and must contain:
@@ -73,7 +104,10 @@ resource_id,type,plan,region,environment,vcpu,ram_gb,disk_size_gb
 
 `team` is optional. `type` values currently supported for costing are `VM`,
 `block_volume`, and `public_ip`. VM rows need telemetry to receive model-based
-recommendations. Inventory resource IDs must be unique.
+recommendations. Inventory resource IDs must be unique. To allow the API to
+identify orphaned storage/IP resources, include an `attached_to`,
+`attached_resource_id`, or `attachment_id` column. An empty value is treated as
+unattached; verify with your cloud provider before cleanup.
 
 Pricing is one row per plan and must contain:
 
@@ -93,7 +127,10 @@ resource_id,timestamp,cpu_utilization_pct,memory_utilization_pct
 
 Utilization values are percentages from 0 to 100. Timestamps must parse as
 datetimes. The forecast model aggregates input telemetry into configurable
-time buckets before training.
+time buckets before training. The dashboard also reads these optional columns
+when supplied: `disk_utilization_pct` (0–100%), `disk_iops` (IOPS),
+`network_in_mbps` and `network_out_mbps` (Mbps). Metrics missing from the file
+are explicitly omitted rather than fabricated.
 
 ## Train and forecast
 
@@ -135,14 +172,107 @@ files or training logs.
 | `POST /api/v1/scenarios/simulate` | Simulate a recurring shutdown schedule, with optional natural-language scenario text |
 | `POST /api/v1/terraform` | Return reviewable Terraform text for one VM plan |
 | `POST /api/v1/descriptions` | Generate a factual summary with Google Gemini |
+| `GET /api/v1/dashboard/summary` | Dashboard totals and metric rollups, with filters |
+| `GET /api/v1/dashboard/resources` | Filterable per-resource utilization and cost estimates |
+| `GET /api/v1/resources/{resource_id}/history` | Drill down into a resource's downsampled history |
+| `POST /api/v1/optimization/actionable` | Peak-based resize, idle-resource, orphan, and schedule suggestions |
+| `POST /api/v1/optimization/jev-risk` | Optional Jev risk assessment for one resource |
+| `GET /api/v1/alerts` | Capacity, spike, trend, budget, and supplied cost-change alerts |
 
 ### Cost and capacity recommendations
 
-Recommendations use the peak forecast q90 CPU/memory utilization and a
-configurable capacity headroom factor. The least expensive catalog plan meeting
-both estimated demands is selected. If it costs more than the current plan, the
-action is `UPSCALE`; if cheaper, `DOWNSIZE`; otherwise `MAINTAIN`. Missing
-forecasts leave a VM at its existing plan and are explicitly marked.
+The original `POST /api/v1/optimization/recommendations` uses forecast q90
+utilization. The dashboard's `POST /api/v1/optimization/actionable` instead
+uses historical p95 or p99 CPU and memory (p99 by default), and a configurable
+headroom factor (1.3 by default). It calculates the capacity required at that
+peak percentile, then selects the least expensive catalog plan meeting both
+CPU and RAM requirements. It reports a specific plan, required capacity,
+estimated monthly savings, confidence in the data coverage, and a capacity-risk
+percentage. This is intended to avoid resizing based only on averages.
+
+The dashboard endpoints accept exact `region`, `environment`, and `team`
+filters. Resource summaries include latest, mean, p95, p99, and maximum values
+for every telemetry metric present. `network_in_mbps` and
+`network_out_mbps` are throughput, not a percent of network capacity; a
+network-capacity percentage requires a provider-specific link limit, which is
+not currently in the input schema. The resource history endpoint defaults to
+the latest seven days and hourly buckets; choose a 5-, 15-, 60-, 240-, or
+1440-minute interval. Up to 90 days can be requested.
+
+The actionable endpoint also flags non-production VMs that are idle across
+CPU, memory, disk IOPS, and network, and suggests shutdown windows when hourly
+CPU p95 stays under 5%. Volumes and IPs are only labelled orphaned when the
+inventory includes an explicit, empty `attached_to`, `attached_resource_id`,
+or `attachment_id` field. Without this metadata, the API returns an attachment
+review item rather than guessing. All actions are suggestions: the API does
+not stop, resize, or delete cloud resources.
+
+`risk_percentage` is an explainable **capacity-pressure index**: the maximum of
+the target plan's projected peak CPU/memory utilization and the existing disk
+utilization percentile. It is not the probability that a VM will fail.
+`confidence_level` is based on the amount and duration of telemetry available:
+at least seven days is high, at least one day is medium, and less than one day
+or missing data is low. These confidence labels describe evidence coverage,
+not a guarantee the recommendation is correct.
+
+Example dashboard calls:
+
+```bash
+# Summary across the last 30 days; filter by any combination of dimensions.
+curl 'http://127.0.0.1:8000/api/v1/dashboard/summary?hours=720&region=mumbai&environment=prod'
+
+# Per-resource utilization rows; add team=Payments to filter by owner.
+curl 'http://127.0.0.1:8000/api/v1/dashboard/resources?hours=720&team=Payments'
+
+# Drill into one VM; points are averaged into hourly buckets by default.
+curl 'http://127.0.0.1:8000/api/v1/resources/res-00001/history?hours=168&interval_minutes=60'
+
+# Use p99 peaks and 30% headroom for each resize recommendation.
+curl -X POST 'http://127.0.0.1:8000/api/v1/optimization/actionable' \
+  -H 'Content-Type: application/json' \
+  -d '{"hours":720,"peak_percentile":99,"headroom":1.3,"environment":"prod"}'
+
+# Compare current-rate monthly cost with budget and a caller-supplied last-month bill.
+curl 'http://127.0.0.1:8000/api/v1/alerts?hours=720&monthly_budget_usd=5000&previous_month_cost_usd=4200'
+```
+
+### Dashboard alerts
+
+`GET /api/v1/alerts` reports:
+
+- Capacity alerts when the selected-window p99 CPU, memory, or disk utilization
+  reaches 85% (high severity at 95%).
+- Usage spikes when the latest hourly p95 is at least 15 percentage points
+  above the prior hourly baseline and exceeds it by three standard deviations;
+  network spikes use a 10 Mbps minimum increase.
+- Capacity trends when daily p95 CPU or memory is rising by at least 0.5
+  percentage points per day and is already at 70% or higher.
+- Budget overruns when `monthly_budget_usd` is below the current-rate monthly
+  estimate.
+- Cost increases when `previous_month_cost_usd` is provided and the catalog-rate
+  estimate is at least 20% above it.
+
+The sample inventory has no billing-history dataset. Therefore the cost-change
+alert compares the catalog-rate projection against a caller-supplied previous
+month amount; it does not claim to be a provider's billed-cost history. Every
+alert includes a reason and supporting values.
+
+### Optional Jev risk assessment
+
+Set `TYPESAFE_API_KEY` in `.env` to enable the
+`POST /api/v1/optimization/jev-risk` endpoint. For one resource, it sends the
+recommendation and derived capacity metrics to TypeSafe's System One API and
+returns Jev's ordinal risk score, level probabilities, and model confidence.
+The service does not send the resource ID or raw telemetry. The
+`risk_score_percentage` is the Jev score normalized to 0–100, **not an outage
+probability**; Jev confidence is confidence in its classification, not the
+chance a recommendation is safe. Jev is advisory and never changes or executes
+the deterministic recommendation. Without an API key, the endpoint returns an
+explicit service-unavailable response.
+The model is configured with `TYPESAFE_MODEL` (default `jev-latest`). This
+integration calls TypeSafe's documented `POST https://api.typesafe.ai/v1/systemone`
+interface using a typed Score question; it is deliberately separate from the
+fast, deterministic dashboard and recommendation endpoints.
 
 The cost endpoint projects the selected plan and current rates across the
 requested 30/60/90-day period. It uses the horizon saved with the trained usage
@@ -227,4 +357,6 @@ pytest
 ```
 
 Tests cover plan selection, per-component costs, scheduled shutdown arithmetic,
-scenario parsing, Terraform input safety, sustainability output, and API health.
+scenario parsing, Terraform input safety, sustainability output, dashboard
+filtering and history, p99-based rightsizing, idle/orphan suggestions, alert
+reasons, Jev response validation, and API health.
