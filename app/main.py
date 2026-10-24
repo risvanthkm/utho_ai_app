@@ -1,8 +1,12 @@
 """FastAPI application entry point."""
 
-from fastapi import FastAPI
+from typing import Any
 
-from app.api.routes import router
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+
+from app.api.routes import ai_router, router
+from app.services.smartcloud_ai import AI_FEATURES
 
 app = FastAPI(
     title="Cloud Resource Advisor API",
@@ -12,9 +16,29 @@ app = FastAPI(
     ),
     version="1.0.0",
 )
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 app.include_router(router)
+app.include_router(ai_router)
+
+
+@app.get("/health")
+def root_health() -> dict[str, Any]:
+    return {
+        "status": "ok",
+        "service": "smartcloud-ai-engine",
+        "port": 8001,
+        "features": AI_FEATURES,
+    }
 
 
 @app.get("/", include_in_schema=False)
 def root() -> dict[str, str]:
-    return {"service": app.title, "docs": "/docs", "health": "/api/v1/health"}
+    return {"service": app.title, "docs": "/docs", "health": "/health"}

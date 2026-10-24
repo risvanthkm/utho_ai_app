@@ -370,3 +370,45 @@ def get_pricing_catalog() -> dict[str, Any]:
         return {"count": len(pricing), "plans": pricing.to_dict(orient="records")}
     except (FileNotFoundError, ValueError) as exc:
         raise _http_error(exc) from exc
+
+
+
+# ===========================================================================
+# SmartCloud Unified AI Orchestration Endpoints (:8001)
+# ===========================================================================
+from fastapi import Body
+from app.services.smartcloud_ai import (
+    correlate_alerts_payload,
+    explain_resource_payload,
+    forecast_costs_and_usage_payload,
+    generate_role_briefing_payload,
+    parse_nl_scenario_payload,
+)
+
+ai_router = APIRouter()
+
+
+@ai_router.post("/ai/explain-resource")
+@router.post("/ai/explain-resource")
+def explain_resource_endpoint(payload: dict[str, Any] = Body(default_factory=dict)) -> dict[str, Any]:
+    return explain_resource_payload(payload)
+
+
+@router.post("/ai/parse-scenario")
+def parse_scenario_endpoint(payload: dict[str, Any] = Body(default_factory=dict)) -> dict[str, Any]:
+    return parse_nl_scenario_payload(payload)
+
+
+@router.post("/ai/correlate-alerts")
+def correlate_alerts_endpoint(payload: dict[str, Any] = Body(default_factory=dict)) -> dict[str, Any]:
+    return correlate_alerts_payload(payload)
+
+
+@router.post("/ai/forecast")
+def ai_forecast_endpoint(payload: dict[str, Any] = Body(default_factory=dict)) -> dict[str, Any]:
+    return forecast_costs_and_usage_payload(payload)
+
+
+@router.post("/ai/briefing")
+def ai_briefing_endpoint(payload: dict[str, Any] = Body(default_factory=dict)) -> dict[str, Any]:
+    return generate_role_briefing_payload(payload)
