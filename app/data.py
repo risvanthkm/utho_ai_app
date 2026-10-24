@@ -7,6 +7,9 @@ from typing import Any
 
 import pandas as pd
 
+from app.config import Settings
+from app.database import inventory_frame, pricing_frame
+
 
 def read_csv(path: Path, required_columns: set[str]) -> pd.DataFrame:
     if not path.is_file():
@@ -55,6 +58,34 @@ def load_pricing(path: Path) -> pd.DataFrame:
     ):
         raise ValueError("Pricing capacities and rates must be non-negative numbers.")
     return pricing
+
+
+def load_configured_inventory(settings: Settings) -> pd.DataFrame:
+    """Load inventory from PostgreSQL when configured, otherwise from the CSV."""
+    if settings.database_url:
+        inventory = inventory_frame(settings)
+        if inventory.empty:
+            raise ValueError("PostgreSQL resource inventory is empty.")
+        if inventory["resource_id"].duplicated().any():
+            raise ValueError("Inventory resource_id values must be unique.")
+        for column in ("vcpu", "ram_gb", "disk_size_gb"):
+            inventory[column] = pd.to_numeric(inventory[column], errors="raise")
+        return inventory
+    return load_inventory(settings.inventory_path)
+
+
+def load_configured_pricing(settings: Settings) -> pd.DataFrame:
+    """Load pricing from PostgreSQL when configured, otherwise from the CSV."""
+    if settings.database_url:
+        pricing = pricing_frame(settings)
+        if pricing.empty:
+            raise ValueError("PostgreSQL pricing catalog is empty.")
+        if pricing["plan"].duplicated().any():
+            raise ValueError("Pricing plan values must be unique.")
+        for column in ("vcpu", "ram_gb", "rate", "storage_rate"):
+            pricing[column] = pd.to_numeric(pricing[column], errors="raise")
+        return pricing
+    return load_pricing(settings.pricing_path)
 
 
 def load_telemetry(path: Path, resource_ids: list[str] | None = None) -> pd.DataFrame:

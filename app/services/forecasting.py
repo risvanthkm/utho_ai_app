@@ -10,7 +10,8 @@ import pandas as pd
 import polars as pl
 
 from app.config import Settings
-from app.data import load_inventory
+from app.data import load_configured_inventory
+from app.database import query_rows
 
 TARGETS = {
     "cpu": "cpu_utilization_pct",
@@ -71,7 +72,7 @@ def _load_panel(
     aggregation_hours: int,
     start_time: pd.Timestamp | None = None,
 ) -> pd.DataFrame:
-    inventory = load_inventory(settings.inventory_path)
+    inventory = load_configured_inventory(settings)
     vm_inventory = inventory[inventory["type"] == "VM"].copy()
     if vm_inventory.empty:
         raise ValueError("The configured inventory contains no VMs.")
@@ -86,44 +87,67 @@ def _load_panel(
     if "team" not in vm_inventory:
         vm_inventory["team"] = "unknown"
     vm_inventory["type"] = "VM"
-    telemetry_path = settings.telemetry_path
-    if not telemetry_path.is_file():
-        raise FileNotFoundError(f"Telemetry dataset not found: {telemetry_path}")
-    if telemetry_path.suffix.lower() == ".parquet":
-        lazy = pl.scan_parquet(telemetry_path)
-    elif telemetry_path.suffix.lower() == ".csv":
-        lazy = pl.scan_csv(telemetry_path, try_parse_dates=True)
+    if settings.database_url:
+        rows = query_rows(
+            settings,
+            """
+            SELECT resource_id,
+                   time_bucket(%s::interval, timestamp) AS timestamp,
+                   avg(cpu_utilization_pct) AS cpu_utilization_pct,
+                   avg(memory_utilization_pct) AS memory_utilization_pct
+            FROM telemetry
+            WHERE resource_id = ANY(%s)
+            GROUP BY resource_id, time_bucket(%s::interval, timestamp)
+            ORDER BY resource_id, timestamp
+            """,
+            (
+                f"{aggregation_hours} hours",
+                vm_inventory["resource_id"].astype(str).tolist(),
+                f"{aggregation_hours} hours",
+            ),
+        )
+        if not rows:
+            raise ValueError("No VM telemetry matched the configured inventory.")
+        panel = pd.DataFrame(rows)
     else:
-        raise ValueError("Telemetry dataset must be .parquet or .csv.")
-    columns = set(lazy.collect_schema().names())
-    missing = {
-        "resource_id",
-        "timestamp",
-        "cpu_utilization_pct",
-        "memory_utilization_pct",
-    } - columns
-    if missing:
-        raise ValueError(f"Telemetry is missing columns: {sorted(missing)}")
+        telemetry_path = settings.telemetry_path
+        if not telemetry_path.is_file():
+            raise FileNotFoundError(f"Telemetry dataset not found: {telemetry_path}")
+        if telemetry_path.suffix.lower() == ".parquet":
+            lazy = pl.scan_parquet(telemetry_path)
+        elif telemetry_path.suffix.lower() == ".csv":
+            lazy = pl.scan_csv(telemetry_path, try_parse_dates=True)
+        else:
+            raise ValueError("Telemetry dataset must be .parquet or .csv.")
+        columns = set(lazy.collect_schema().names())
+        missing = {
+            "resource_id",
+            "timestamp",
+            "cpu_utilization_pct",
+            "memory_utilization_pct",
+        } - columns
+        if missing:
+            raise ValueError(f"Telemetry is missing columns: {sorted(missing)}")
 
-    vm_ids = pl.DataFrame({"resource_id": vm_inventory["resource_id"].astype(str)}).lazy()
-    aggregated = (
-        lazy.with_columns(pl.col("resource_id").cast(pl.String))
-        .join(vm_ids, on="resource_id", how="inner")
-        .sort(["resource_id", "timestamp"])
-        .group_by_dynamic(
-            index_column="timestamp",
-            every=f"{aggregation_hours}h",
-            group_by="resource_id",
+        vm_ids = pl.DataFrame({"resource_id": vm_inventory["resource_id"].astype(str)}).lazy()
+        aggregated = (
+            lazy.with_columns(pl.col("resource_id").cast(pl.String))
+            .join(vm_ids, on="resource_id", how="inner")
+            .sort(["resource_id", "timestamp"])
+            .group_by_dynamic(
+                index_column="timestamp",
+                every=f"{aggregation_hours}h",
+                group_by="resource_id",
+            )
+            .agg(
+                pl.col("cpu_utilization_pct").mean(),
+                pl.col("memory_utilization_pct").mean(),
+            )
+            .collect()
         )
-        .agg(
-            pl.col("cpu_utilization_pct").mean(),
-            pl.col("memory_utilization_pct").mean(),
-        )
-        .collect()
-    )
-    if aggregated.is_empty():
-        raise ValueError("No VM telemetry matched the configured inventory.")
-    panel = aggregated.to_pandas()
+        if aggregated.is_empty():
+            raise ValueError("No VM telemetry matched the configured inventory.")
+        panel = aggregated.to_pandas()
     panel["timestamp"] = pd.to_datetime(panel["timestamp"], errors="raise")
     panel = panel.merge(
         vm_inventory[

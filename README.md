@@ -16,6 +16,8 @@ app/
   api/routes.py             HTTP endpoints and request handling
   config.py                 Environment-based paths and service settings
   data.py                   Dataset loading and schema checks
+  database.py               PostgreSQL queries and dataframe loading
+  seed.py                   CSV/Parquet to PostgreSQL/TimescaleDB importer
   main.py                   FastAPI application
   schemas.py                Validated API request and response models
   services/
@@ -30,6 +32,7 @@ app/
 datasets/
   raw/                      Put input inventory, pricing, and telemetry here
   generated/                Optional local/generated data; ignored by Git
+db/init/                    PostgreSQL and TimescaleDB schema
 models/                     Locally trained checkpoints; ignored by Git
 tests/                      Unit and API tests
 ```
@@ -62,26 +65,39 @@ Start the API:
 uvicorn app.main:app --reload --env-file .env
 ```
 
+For CSV/Parquet-only local mode, leave `DATABASE_URL` unset in `.env`. To use
+the Compose database from a host-run API process, set its URL host to
+`localhost` (Compose service hostnames such as `db` resolve only inside the
+Compose network).
+
 Open interactive API docs at `http://127.0.0.1:8000/docs`; health check is
 `GET /api/v1/health`.
 
 ## Run with Docker Compose
 
-Install Docker Engine and the Docker Compose plugin. Keep your inventory,
-pricing, and telemetry files in `datasets/raw/`; Compose mounts this directory
-read-only into the container, so large or private telemetry is not copied into
-the image. The trained model is saved in a persistent Docker volume.
+Install Docker Engine and the Docker Compose plugin. Keep inventory, pricing,
+and telemetry in `datasets/raw/`; Compose mounts them read-only, so the large
+telemetry file is not copied into the image.
 
 ```bash
 cp .env.example .env
-docker compose up --build
+docker compose up -d db
+docker compose --profile seed run --rm seed
+docker compose up --build api
 ```
 
-The API is available at `http://localhost:8000/docs`. To use another host port,
-set `API_PORT` in `.env`. Optional Google AI and TypeSafe credentials can also
-be configured there. Stop the service with `docker compose down`; model
-checkpoints remain in the volume. To remove them as well, run
+The seed service imports `inventory.csv`, `pricing.csv`, and
+`telemetry.parquet`; telemetry is loaded in batches. Re-running the importer
+upserts rows by resource and timestamp. The API is available at
+`http://localhost:8000/docs`. Set `GOOGLE_API_KEY` in `.env` to enable the
+chatbot. Change the example PostgreSQL password before exposing the stack
+beyond local development. Stop services with `docker compose down`; database
+contents and trained models remain in named volumes. Remove them with
 `docker compose down --volumes`.
+
+When `DATABASE_URL` is configured, the application reads inventory, pricing,
+dashboard/history/alert telemetry, and TFT training inputs from PostgreSQL /
+TimescaleDB. Without it, local development retains the CSV/Parquet data path.
 
 To build and run the API image without Compose, first ensure the configured
 datasets exist in `datasets/raw/`, then run:
@@ -164,6 +180,8 @@ files or training logs.
 | Endpoint | Purpose |
 | --- | --- |
 | `GET /api/v1/resources` | Read the configured inventory |
+| `POST /api/v1/chat` | Grounded chatbot for resource data, history, forecasts, cost, recommendations, alerts, and what-if scenarios |
+| `GET /api/v1/chat/{conversation_id}` | Restore a persisted chatbot conversation |
 | `GET /api/v1/catalog` | Read configured plan prices/capacities |
 | `POST /api/v1/forecast/train` | Train pooled CPU and memory TFT models |
 | `POST /api/v1/forecast/usage` | Forecast all VMs using saved models |
@@ -178,6 +196,53 @@ files or training logs.
 | `POST /api/v1/optimization/actionable` | Peak-based resize, idle-resource, orphan, and schedule suggestions |
 | `POST /api/v1/optimization/jev-risk` | Optional Jev risk assessment for one resource |
 | `GET /api/v1/alerts` | Capacity, spike, trend, budget, and supplied cost-change alerts |
+
+### Chatbot and database
+
+`POST /api/v1/chat` accepts `{"message":"...","conversation_id":null}`. It
+returns an answer, the tool used, supporting data, and a conversation ID. Send
+that ID on the next request to continue the same conversation. Chat turns are
+stored in PostgreSQL. Gemini classifies the request into a fixed allowlist of
+read-only application tools; the backend executes the existing data/forecast/
+simulation services and then asks Gemini to explain those results. The model
+does not generate SQL or execute cloud changes.
+
+Supported intents include resource list/filter, per-resource or fleet history,
+dashboard summaries, historical or forecast-based rightsizing, alerts, TFT
+forecasts, cost projections, sustainability estimates, optional Jev assessments,
+Terraform text generation when its required inputs are supplied, and
+natural-language shutdown scenarios. Chart history is
+automatically downsampled to at most 1,200 points per chatbot response. If the
+request needs an unavailable model checkpoint, telemetry, resource ID, or
+scenario details, the API reports that limitation rather than fabricating a
+result. Set `GOOGLE_API_KEY` to enable chat; set `DATABASE_URL` because
+conversation history is persisted there. This repository contains the backend
+API; a web-client chat panel must call the API and retain the conversation ID.
+
+```bash
+curl -X POST 'http://127.0.0.1:8000/api/v1/chat' \
+  -H 'Content-Type: application/json' \
+  -d '{"message":"Show the last 7 days of CPU and memory for res-00001"}'
+
+# Reuse the returned conversation_id for follow-up questions.
+curl 'http://127.0.0.1:8000/api/v1/chat/<conversation_id>'
+```
+
+The Docker Compose database uses TimescaleDB (PostgreSQL) with a hypertable for
+telemetry, relational inventory and pricing tables, and conversation/message
+tables. `app/seed.py` imports the existing CSV and Parquet datasets. Dashboard
+percentiles and graph buckets are calculated in SQL with resource/time filters;
+TFT training reads telemetry aggregated into the requested time buckets. The
+seed operation is explicit so an 8.64-million-row telemetry import does not
+run every time the API container restarts.
+
+No pgvector extension is included. The chatbot's operational data is
+structured and time-sensitive, so it should query indexed database fields and
+existing calculations rather than use embeddings to retrieve metric values.
+If natural-language retrieval over runbooks or policy documents is added later,
+vector search can be considered for those documents. Caching dynamic cost,
+forecast, or utilization answers by query embedding could return stale values,
+so it is not used here.
 
 ### Cost and capacity recommendations
 

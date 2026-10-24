@@ -34,6 +34,7 @@ class Settings:
     grid_carbon_kg_per_kwh: float
     typesafe_api_key: str | None = None
     typesafe_model: str = "jev-latest"
+    database_url: str | None = None
 
     @classmethod
     def from_environment(cls) -> Settings:
@@ -54,6 +55,7 @@ class Settings:
             google_model=os.getenv("GOOGLE_MODEL", "gemini-2.5-flash"),
             typesafe_api_key=os.getenv("TYPESAFE_API_KEY"),
             typesafe_model=os.getenv("TYPESAFE_MODEL", "jev-latest"),
+            database_url=os.getenv("DATABASE_URL") or None,
             watts_per_vcpu_at_idle=float(os.getenv("WATTS_PER_VCPU_IDLE", "5")),
             watts_per_vcpu_at_full_load=float(os.getenv("WATTS_PER_VCPU_FULL", "15")),
             power_usage_effectiveness=float(os.getenv("DATA_CENTER_PUE", "1.4")),

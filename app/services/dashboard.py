@@ -9,7 +9,8 @@ import pandas as pd
 import polars as pl
 
 from app.config import Settings
-from app.data import load_inventory, load_pricing
+from app.data import load_configured_inventory, load_configured_pricing
+from app.database import query_rows, telemetry_columns
 
 METRICS = {
     "cpu_utilization_pct": {"unit": "percent", "label": "CPU"},
@@ -24,6 +25,10 @@ MONTHLY_HOURS = 730
 
 
 def _telemetry_scan(settings: Settings) -> tuple[pl.LazyFrame, set[str]]:
+    if settings.database_url:
+        raise RuntimeError(
+            "PostgreSQL telemetry must be queried with a bounded time/resource filter."
+        )
     path = settings.telemetry_path
     if not path.is_file():
         raise FileNotFoundError(f"Telemetry dataset not found: {path}")
@@ -80,6 +85,46 @@ def _aggregate_stats(
 ) -> tuple[list[dict[str, Any]], pd.Timestamp, pd.Timestamp, set[str]]:
     if not resource_ids:
         return [], pd.NaT, pd.NaT, set()
+    if settings.database_url:
+        columns = telemetry_columns(settings)
+        available_metrics = set(METRICS).intersection(columns)
+        end_rows = query_rows(
+            settings,
+            "SELECT max(timestamp) AS end_time FROM telemetry WHERE resource_id = ANY(%s)",
+            (resource_ids,),
+        )
+        end_value = end_rows[0]["end_time"] if end_rows else None
+        if end_value is None:
+            return [], pd.NaT, pd.NaT, available_metrics
+        end = pd.Timestamp(end_value)
+        start = end - pd.Timedelta(hours=hours)
+        selects = [
+            "count(*) AS sample_count",
+            "min(timestamp) AS first_seen",
+            "max(timestamp) AS last_seen",
+        ]
+        for name in METRICS:
+            if name in available_metrics:
+                selects.extend(
+                    [
+                        f"avg({name}) AS {name}_mean",
+                        f"percentile_cont(0.95) WITHIN GROUP (ORDER BY {name}) AS {name}_p95",
+                        f"percentile_cont(0.99) WITHIN GROUP (ORDER BY {name}) AS {name}_p99",
+                        f"max({name}) AS {name}_max",
+                        f"(array_agg({name} ORDER BY timestamp DESC))[1] AS {name}_latest",
+                    ]
+                )
+        rows = query_rows(
+            settings,
+            f"""
+            SELECT resource_id, {", ".join(selects)}
+            FROM telemetry
+            WHERE resource_id = ANY(%s) AND timestamp BETWEEN %s AND %s
+            GROUP BY resource_id
+            """,
+            (resource_ids, start.to_pydatetime(), end.to_pydatetime()),
+        )
+        return rows, start, end, available_metrics
     telemetry, columns = _telemetry_scan(settings)
     available_metrics = set(METRICS).intersection(columns)
     filtered = telemetry.filter(pl.col("resource_id").is_in(resource_ids))
@@ -140,12 +185,12 @@ def dashboard_resources(
 ) -> dict[str, Any]:
     if not 1 <= hours <= 24 * 90:
         raise ValueError("Dashboard hours must be from 1 to 2160.")
-    inventory = load_inventory(settings.inventory_path)
+    inventory = load_configured_inventory(settings)
     selected = _filtered_inventory(inventory, region, environment, team)
     ids = selected["resource_id"].astype(str).tolist()
     stats, start, end, available_metrics = _aggregate_stats(settings, ids, hours)
     stats_by_id = {str(row["resource_id"]): row for row in stats}
-    pricing = load_pricing(settings.pricing_path)
+    pricing = load_configured_pricing(settings)
     rates = pricing.set_index("plan").to_dict(orient="index")
 
     resources: list[dict[str, Any]] = []
@@ -247,10 +292,58 @@ def resource_history(
         raise ValueError("History hours must be from 1 to 2160.")
     if interval_minutes not in {5, 15, 60, 240, 1440}:
         raise ValueError("interval_minutes must be one of 5, 15, 60, 240, or 1440.")
-    inventory = load_inventory(settings.inventory_path)
+    inventory = load_configured_inventory(settings)
     matches = inventory[inventory["resource_id"].astype(str) == resource_id]
     if matches.empty:
         raise KeyError(f"Unknown resource_id: {resource_id}")
+    if settings.database_url:
+        available_metrics = sorted(set(METRICS).intersection(telemetry_columns(settings)))
+        end_rows = query_rows(
+            settings,
+            "SELECT max(timestamp) AS end_time FROM telemetry WHERE resource_id = %s",
+            (resource_id,),
+        )
+        if not end_rows or end_rows[0]["end_time"] is None:
+            raise KeyError(f"No telemetry history found for resource_id: {resource_id}")
+        end = pd.Timestamp(end_rows[0]["end_time"])
+        start = end - pd.Timedelta(hours=hours)
+        selected_metrics = [name for name in METRICS if name in available_metrics]
+        expressions = [f"avg({name}) AS {name}" for name in selected_metrics]
+        metric_sql = f", {', '.join(expressions)}" if expressions else ""
+        rows = query_rows(
+            settings,
+            f"""
+            SELECT time_bucket(%s::interval, timestamp) AS timestamp,
+                   count(*) AS sample_count{metric_sql}
+            FROM telemetry
+            WHERE resource_id = %s AND timestamp BETWEEN %s AND %s
+            GROUP BY 1 ORDER BY 1
+            """,
+            (
+                f"{interval_minutes} minutes",
+                resource_id,
+                start.to_pydatetime(),
+                end.to_pydatetime(),
+            ),
+        )
+        points = [
+            {
+                "timestamp": pd.Timestamp(row["timestamp"]).isoformat(),
+                "sample_count": row["sample_count"],
+                "metrics": {
+                    name: {"value": row.get(name), "unit": METRICS[name]["unit"]}
+                    for name in available_metrics
+                },
+            }
+            for row in rows
+        ]
+        return {
+            "resource": matches.iloc[0].where(pd.notna(matches.iloc[0]), None).to_dict(),
+            "window": {"hours": hours, "start": start.isoformat(), "end": end.isoformat()},
+            "interval_minutes": interval_minutes,
+            "available_metrics": available_metrics,
+            "points": points,
+        }
     telemetry, columns = _telemetry_scan(settings)
     available_metrics = sorted(set(METRICS).intersection(columns))
     filtered = telemetry.filter(pl.col("resource_id") == resource_id)
@@ -306,6 +399,145 @@ def resource_history(
     }
 
 
+def fleet_history(
+    settings: Settings,
+    hours: int = 24 * 7,
+    interval_minutes: int = 60,
+    region: str | None = None,
+    environment: str | None = None,
+    team: str | None = None,
+) -> dict[str, Any]:
+    """Return fleet-level percentile history, grouped into bounded time buckets."""
+    if not 1 <= hours <= 24 * 90:
+        raise ValueError("History hours must be from 1 to 2160.")
+    if interval_minutes not in {5, 15, 60, 240, 1440}:
+        raise ValueError("interval_minutes must be one of 5, 15, 60, 240, or 1440.")
+    inventory = load_configured_inventory(settings)
+    selected = _filtered_inventory(inventory, region, environment, team)
+    resource_ids = selected["resource_id"].astype(str).tolist()
+    if not resource_ids:
+        return {
+            "count": 0,
+            "filters": {"region": region, "environment": environment, "team": team},
+            "hours": hours,
+            "interval_minutes": interval_minutes,
+            "available_metrics": [],
+            "points": [],
+        }
+    available_metrics = (
+        sorted(set(METRICS).intersection(telemetry_columns(settings)))
+        if settings.database_url
+        else sorted(set(METRICS).intersection(_telemetry_scan(settings)[1]))
+    )
+    if not available_metrics:
+        return {
+            "count": 0,
+            "filters": {"region": region, "environment": environment, "team": team},
+            "hours": hours,
+            "interval_minutes": interval_minutes,
+            "available_metrics": [],
+            "points": [],
+        }
+    interval = f"{interval_minutes} minutes"
+    if settings.database_url:
+        end_rows = query_rows(
+            settings,
+            "SELECT max(timestamp) AS end_time FROM telemetry WHERE resource_id = ANY(%s)",
+            (resource_ids,),
+        )
+        end_value = end_rows[0]["end_time"] if end_rows else None
+        if end_value is None:
+            return {
+                "count": 0,
+                "filters": {"region": region, "environment": environment, "team": team},
+                "hours": hours,
+                "interval_minutes": interval_minutes,
+                "available_metrics": available_metrics,
+                "points": [],
+            }
+        end = pd.Timestamp(end_value)
+        start = end - pd.Timedelta(hours=hours)
+        expressions = []
+        for name in available_metrics:
+            expressions.extend(
+                [
+                    f"avg({name}) AS {name}_mean",
+                    f"percentile_cont(0.95) WITHIN GROUP (ORDER BY {name}) AS {name}_p95",
+                ]
+            )
+        rows = query_rows(
+            settings,
+            f"""
+            SELECT time_bucket(%s::interval, timestamp) AS timestamp,
+                   count(*) AS sample_count, count(DISTINCT resource_id) AS resource_count,
+                   {", ".join(expressions)}
+            FROM telemetry
+            WHERE resource_id = ANY(%s) AND timestamp BETWEEN %s AND %s
+            GROUP BY 1 ORDER BY 1
+            """,
+            (interval, resource_ids, start.to_pydatetime(), end.to_pydatetime()),
+        )
+    else:
+        telemetry, columns = _telemetry_scan(settings)
+        end_rows = (
+            telemetry.filter(pl.col("resource_id").is_in(resource_ids))
+            .select(pl.col("timestamp").max())
+            .collect()
+            .to_dicts()
+        )
+        if not end_rows or end_rows[0]["timestamp"] is None:
+            rows = []
+            start = end = pd.NaT
+        else:
+            end = pd.Timestamp(end_rows[0]["timestamp"])
+            start = end - pd.Timedelta(hours=hours)
+            names = [name for name in available_metrics if name in columns]
+            rows = (
+                telemetry.filter(
+                    pl.col("resource_id").is_in(resource_ids)
+                    & (pl.col("timestamp") >= start.to_pydatetime())
+                    & (pl.col("timestamp") <= end.to_pydatetime())
+                )
+                .with_columns(_nullable_metric_exprs(columns))
+                .sort("timestamp")
+                .group_by_dynamic(
+                    "timestamp",
+                    every=interval,
+                    label="left",
+                    closed="left",
+                )
+                .agg(
+                    pl.len().alias("sample_count"),
+                    pl.col("resource_id").n_unique().alias("resource_count"),
+                    *[
+                        expression
+                        for name in names
+                        for expression in (
+                            pl.col(name).mean().alias(f"{name}_mean"),
+                            pl.col(name)
+                            .quantile(0.95, interpolation="linear")
+                            .alias(f"{name}_p95"),
+                        )
+                    ],
+                )
+                .sort("timestamp")
+                .collect()
+                .to_dicts()
+            )
+    return {
+        "count": len(rows),
+        "filters": {"region": region, "environment": environment, "team": team},
+        "hours": hours,
+        "window": {
+            "start": start.isoformat() if not pd.isna(start) else None,
+            "end": end.isoformat() if not pd.isna(end) else None,
+        },
+        "interval_minutes": interval_minutes,
+        "available_metrics": available_metrics,
+        "points": rows,
+    }
+
+
 def _confidence(sample_count: int, first_seen: Any, last_seen: Any) -> tuple[str, str]:
     if sample_count < 288:
         return "LOW", "Fewer than 24 hours of five-minute telemetry are available."
@@ -323,6 +555,43 @@ def _hourly_low_windows(
 ) -> dict[str, tuple[int, int]]:
     if not resource_ids:
         return {}
+    if settings.database_url:
+        if "cpu_utilization_pct" not in telemetry_columns(settings):
+            return {}
+        rows = query_rows(
+            settings,
+            """
+            SELECT resource_id, extract(hour FROM timestamp)::integer AS hour,
+                   percentile_cont(0.95) WITHIN GROUP (ORDER BY cpu_utilization_pct) AS cpu_p95
+            FROM telemetry
+            WHERE resource_id = ANY(%s) AND timestamp BETWEEN %s AND %s
+            GROUP BY resource_id, extract(hour FROM timestamp)
+            """,
+            (resource_ids, start.to_pydatetime(), end.to_pydatetime()),
+        )
+        by_resource: dict[str, dict[int, float]] = {}
+        for row in rows:
+            by_resource.setdefault(str(row["resource_id"]), {})[int(row["hour"])] = float(
+                row["cpu_p95"]
+            )
+        schedules: dict[str, tuple[int, int]] = {}
+        for resource_id, hourly in by_resource.items():
+            low_hours = {hour for hour, value in hourly.items() if value < 5}
+            if len(low_hours) < 4 or len(low_hours) == 24:
+                continue
+            candidates = []
+            for start_hour in range(24):
+                if start_hour not in low_hours or (start_hour - 1) % 24 in low_hours:
+                    continue
+                duration = 0
+                while (start_hour + duration) % 24 in low_hours and duration < 24:
+                    duration += 1
+                candidates.append((duration, start_hour, (start_hour + duration) % 24))
+            if candidates:
+                duration, start_hour, end_hour = max(candidates)
+                if duration >= 4:
+                    schedules[resource_id] = (start_hour, end_hour)
+        return schedules
     telemetry, columns = _telemetry_scan(settings)
     if "cpu_utilization_pct" not in columns:
         return {}
@@ -377,9 +646,9 @@ def actionable_recommendations(
     if not np.isfinite(headroom) or not 1 <= headroom <= 3:
         raise ValueError("headroom must be between 1 and 3.")
     dashboard = dashboard_resources(settings, hours, region, environment, team)
-    inventory = load_inventory(settings.inventory_path)
+    inventory = load_configured_inventory(settings)
     selected = _filtered_inventory(inventory, region, environment, team)
-    pricing = load_pricing(settings.pricing_path)
+    pricing = load_configured_pricing(settings)
     vm_catalog = pricing[pricing["type"] == "VM"]
     all_prices_by_plan = pricing.set_index("plan").to_dict(orient="index")
     resource_stats = {item["resource_id"]: item for item in dashboard["resources"]}
@@ -662,6 +931,29 @@ def _bucketed_history(
 ) -> list[dict[str, Any]]:
     if not resource_ids:
         return []
+    if settings.database_url:
+        columns = telemetry_columns(settings)
+        names = [name for name in METRICS if name in columns]
+        if not names:
+            return []
+        bucket = {"1h": "1 hour", "1d": "1 day"}.get(every)
+        if bucket is None:
+            raise ValueError(f"Unsupported bucket interval: {every}")
+        expressions = [
+            f"percentile_cont(0.95) WITHIN GROUP (ORDER BY {name}) AS {name}" for name in names
+        ]
+        return query_rows(
+            settings,
+            f"""
+            SELECT resource_id, time_bucket(%s::interval, timestamp) AS timestamp,
+                   {", ".join(expressions)}
+            FROM telemetry
+            WHERE resource_id = ANY(%s) AND timestamp BETWEEN %s AND %s
+            GROUP BY resource_id, time_bucket(%s::interval, timestamp)
+            ORDER BY resource_id, timestamp
+            """,
+            (bucket, resource_ids, start.to_pydatetime(), end.to_pydatetime(), bucket),
+        )
     telemetry, columns = _telemetry_scan(settings)
     names = [name for name in METRICS if name in columns]
     if not names:
@@ -698,7 +990,7 @@ def dashboard_alerts(
     previous_month_cost_usd: float | None = None,
 ) -> dict[str, Any]:
     dashboard = dashboard_resources(settings, hours, region, environment, team)
-    inventory = load_inventory(settings.inventory_path)
+    inventory = load_configured_inventory(settings)
     selected = _filtered_inventory(inventory, region, environment, team)
     alerts: list[dict[str, Any]] = []
     items = {item["resource_id"]: item for item in dashboard["resources"]}

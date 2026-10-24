@@ -5,12 +5,17 @@ from __future__ import annotations
 from typing import Any
 
 import pandas as pd
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Body, HTTPException, Query
 from starlette.concurrency import run_in_threadpool
 
 from app.config import settings
-from app.data import inventory_records, load_inventory, load_pricing
+from app.data import (
+    inventory_records,
+    load_configured_inventory,
+    load_configured_pricing,
+)
 from app.schemas import (
+    ChatRequest,
     CostForecastRequest,
     DashboardRecommendationRequest,
     DescriptionRequest,
@@ -21,6 +26,7 @@ from app.schemas import (
     TerraformRequest,
     TrainRequest,
 )
+from app.services.chatbot import chat, conversation_history
 from app.services.dashboard import (
     actionable_recommendations,
     dashboard_alerts,
@@ -37,6 +43,13 @@ from app.services.forecasting import (
 from app.services.jev import assess_recommendation
 from app.services.optimization import build_recommendations, inventory_costs
 from app.services.scenarios import parse_scenario_text, simulate_scenario
+from app.services.smartcloud_ai import (
+    correlate_alerts_payload,
+    explain_resource_payload,
+    forecast_costs_and_usage_payload,
+    generate_role_briefing_payload,
+    parse_nl_scenario_payload,
+)
 from app.services.sustainability import estimate_sustainability
 from app.services.terraform import generate_vm_terraform
 
@@ -94,10 +107,28 @@ def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
+@router.post("/chat")
+def chat_with_resource_advisor(request: ChatRequest) -> dict[str, Any]:
+    try:
+        return chat(settings, request.message, request.conversation_id)
+    except (FileNotFoundError, ValueError, RuntimeError, KeyError) as exc:
+        raise _http_error(exc) from exc
+
+
+@router.get("/chat/{conversation_id}")
+def get_chat_history(conversation_id: str) -> dict[str, Any]:
+    try:
+        return conversation_history(settings, conversation_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except (FileNotFoundError, ValueError, RuntimeError) as exc:
+        raise _http_error(exc) from exc
+
+
 @router.get("/resources")
 def list_resources() -> dict[str, Any]:
     try:
-        inventory = load_inventory(settings.inventory_path)
+        inventory = load_configured_inventory(settings)
         return {"count": len(inventory), "resources": inventory_records(inventory)}
     except (FileNotFoundError, ValueError) as exc:
         raise _http_error(exc) from exc
@@ -241,8 +272,8 @@ def get_usage_forecast(request: ForecastRequest) -> dict[str, Any]:
 @router.post("/optimization/recommendations")
 def get_recommendations(request: RecommendationRequest) -> dict[str, Any]:
     try:
-        inventory = load_inventory(settings.inventory_path)
-        pricing = load_pricing(settings.pricing_path)
+        inventory = load_configured_inventory(settings)
+        pricing = load_configured_pricing(settings)
         forecasts = _forecast_or_error(request.hours)
         recommendations = _recommendations(
             request.hours, request.headroom, inventory, pricing, forecasts
@@ -261,8 +292,8 @@ def get_recommendations(request: RecommendationRequest) -> dict[str, Any]:
 @router.post("/costs/forecast")
 def get_cost_forecast(request: CostForecastRequest) -> dict[str, Any]:
     try:
-        inventory = load_inventory(settings.inventory_path)
-        pricing = load_pricing(settings.pricing_path)
+        inventory = load_configured_inventory(settings)
+        pricing = load_configured_pricing(settings)
         forecast_hours = trained_prediction_hours(settings)
         forecasts = _forecast_or_error(forecast_hours)
         recommendations = _recommendations(
@@ -289,8 +320,8 @@ def get_cost_forecast(request: CostForecastRequest) -> dict[str, Any]:
 def simulate_what_if(request: ScenarioRequest) -> dict[str, Any]:
     try:
         values = _scenario_values(request)
-        inventory = load_inventory(settings.inventory_path)
-        pricing = load_pricing(settings.pricing_path)
+        inventory = load_configured_inventory(settings)
+        pricing = load_configured_pricing(settings)
         forecast_hours = trained_prediction_hours(settings)
         forecasts = _forecast_or_error(forecast_hours)
         recommendations = _recommendations(
@@ -336,11 +367,11 @@ def simulate_what_if(request: ScenarioRequest) -> dict[str, Any]:
 @router.post("/terraform")
 def terraform_for_resource(request: TerraformRequest) -> dict[str, str]:
     try:
-        inventory = load_inventory(settings.inventory_path)
+        inventory = load_configured_inventory(settings)
         resource = inventory[inventory["resource_id"].astype(str) == request.resource_id]
         if resource.empty:
             raise ValueError(f"Unknown resource_id: {request.resource_id}")
-        pricing = load_pricing(settings.pricing_path)
+        pricing = load_configured_pricing(settings)
         result = generate_vm_terraform(
             request.resource_id,
             request.plan,
@@ -366,31 +397,23 @@ def describe_recommendation(request: DescriptionRequest) -> dict[str, str]:
 @router.get("/catalog")
 def get_pricing_catalog() -> dict[str, Any]:
     try:
-        pricing = load_pricing(settings.pricing_path)
+        pricing = load_configured_pricing(settings)
         return {"count": len(pricing), "plans": pricing.to_dict(orient="records")}
     except (FileNotFoundError, ValueError) as exc:
         raise _http_error(exc) from exc
 
 
-
 # ===========================================================================
 # SmartCloud Unified AI Orchestration Endpoints (:8001)
 # ===========================================================================
-from fastapi import Body
-from app.services.smartcloud_ai import (
-    correlate_alerts_payload,
-    explain_resource_payload,
-    forecast_costs_and_usage_payload,
-    generate_role_briefing_payload,
-    parse_nl_scenario_payload,
-)
-
 ai_router = APIRouter()
 
 
 @ai_router.post("/ai/explain-resource")
 @router.post("/ai/explain-resource")
-def explain_resource_endpoint(payload: dict[str, Any] = Body(default_factory=dict)) -> dict[str, Any]:
+def explain_resource_endpoint(
+    payload: dict[str, Any] = Body(default_factory=dict),
+) -> dict[str, Any]:
     return explain_resource_payload(payload)
 
 
@@ -400,7 +423,9 @@ def parse_scenario_endpoint(payload: dict[str, Any] = Body(default_factory=dict)
 
 
 @router.post("/ai/correlate-alerts")
-def correlate_alerts_endpoint(payload: dict[str, Any] = Body(default_factory=dict)) -> dict[str, Any]:
+def correlate_alerts_endpoint(
+    payload: dict[str, Any] = Body(default_factory=dict),
+) -> dict[str, Any]:
     return correlate_alerts_payload(payload)
 
 

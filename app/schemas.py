@@ -74,6 +74,11 @@ class DescriptionRequest(APIModel):
     facts: dict[str, str | int | float | bool | None]
 
 
+class ChatRequest(APIModel):
+    message: str = Field(min_length=1, max_length=4000)
+    conversation_id: str | None = Field(default=None, max_length=36)
+
+
 class SustainabilitySummary(BaseModel):
     estimated_energy_saved_kwh: float
     estimated_carbon_saved_kg_co2e: float

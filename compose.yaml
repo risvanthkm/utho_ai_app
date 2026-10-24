@@ -1,4 +1,22 @@
 services:
+  db:
+    image: timescale/timescaledb:2.17.2-pg16
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-resource_advisor}
+      POSTGRES_USER: ${POSTGRES_USER:-resource_advisor}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change-this-local-password}
+    ports:
+      - "${DB_PORT:-5432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./db/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    restart: unless-stopped
+
   api:
     build:
       context: .
@@ -10,6 +28,7 @@ services:
       PRICING_PATH: /app/datasets/raw/pricing.csv
       TELEMETRY_PATH: /app/datasets/raw/telemetry.parquet
       MODEL_DIR: /app/models/tft
+      DATABASE_URL: ${DATABASE_URL:-postgresql://${POSTGRES_USER:-resource_advisor}:${POSTGRES_PASSWORD:-change-this-local-password}@db:5432/${POSTGRES_DB:-resource_advisor}}
       AWS_REGION: ${AWS_REGION:-us-east-1}
       GOOGLE_API_KEY: ${GOOGLE_API_KEY:-}
       GOOGLE_MODEL: ${GOOGLE_MODEL:-gemini-2.5-flash}
@@ -22,7 +41,28 @@ services:
     volumes:
       - ./datasets/raw:/app/datasets/raw:ro
       - model_data:/app/models
+    depends_on:
+      db:
+        condition: service_healthy
     restart: unless-stopped
 
+  seed:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: ["python", "-m", "app.seed"]
+    environment:
+      INVENTORY_PATH: /app/datasets/raw/inventory.csv
+      PRICING_PATH: /app/datasets/raw/pricing.csv
+      TELEMETRY_PATH: /app/datasets/raw/telemetry.parquet
+      DATABASE_URL: ${DATABASE_URL:-postgresql://${POSTGRES_USER:-resource_advisor}:${POSTGRES_PASSWORD:-change-this-local-password}@db:5432/${POSTGRES_DB:-resource_advisor}}
+    volumes:
+      - ./datasets/raw:/app/datasets/raw:ro
+    depends_on:
+      db:
+        condition: service_healthy
+    profiles: ["seed"]
+
 volumes:
+  postgres_data:
   model_data:
