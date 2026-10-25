@@ -1,5 +1,9 @@
 # FinSort — Python AI, TFT Forecasting & SRE Intelligence (`utho_ai_app`)
 
+[![Launch Live Platform — utho.risvanth.online](https://img.shields.io/badge/LIVE_DEPLOYMENT-utho.risvanth.online-111318?style=for-the-badge&labelColor=1D5C46)](http://utho.risvanth.online)
+
+**Live Demo:** **[http://utho.risvanth.online](http://utho.risvanth.online)**
+
 > **Jury Overview:** `utho_ai_app` is the AI, machine-learning forecasting, and SRE root-cause intelligence microservice for **FinSort** on **Utho Cloud** (`in-mumbai-1`, `in-noida-1`, `in-bangalore-1`). It provides **Temporal Fusion Transformer (TFT) P10/P50/P90 quantile usage & cost forecasting**, **SRE telemetry audits with mathematical headroom proofs**, **ordinal capacity risk scoring (Jev)**, **natural-language What-If scenario parsing**, **Terraform HCL generation**, and a **retrieval-grounded FinOps Copilot** powered by Google Gemini.
 
 ---
