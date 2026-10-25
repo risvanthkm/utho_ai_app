@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # =============================================================================
-# SmartCloud Optimizer (FinSort) — WSL2 & Linux One-Command Docker Launcher
+# FinSort — Cloud Infrastructure Optimizer — WSL2 & Linux One-Command Docker Launcher
 # Clones missing sibling repos automatically (if needed), builds all Docker
 # images (TimescaleDB, Python AI, Go Backend, React Nginx), and verifies health.
 # =============================================================================
@@ -10,7 +10,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PARENT_DIR="$(dirname "$SCRIPT_DIR")"
 
 echo "=================================================================="
-echo "  SmartCloud Optimizer (FinSort) — Unified Docker Deployment"
+echo "  FinSort — Unified Docker Deployment"
 echo "=================================================================="
 
 # 1. Verify sibling repositories exist (or auto-clone them in WSL2/cloud VM)

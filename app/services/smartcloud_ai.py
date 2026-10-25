@@ -262,7 +262,7 @@ def _build_utho_terraform_snippet(res: dict[str, Any], target_plan: str) -> str:
         f'  plan        = "{target_plan}"\n'
         f'  environment = "{env}"\n'
         f"  tags = {{\n"
-        f'    ManagedBy  = "SmartCloud-FinOps"\n'
+        f'    ManagedBy  = "FinSort-FinOps"\n'
         f'    ResourceID = "{res_id}"\n'
         f"  }}\n"
         f"}}\n"
