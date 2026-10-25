@@ -10,9 +10,31 @@ def test_health_endpoint():
 
 
 def test_cost_horizon_is_limited_to_documented_options():
-    response = TestClient(app).post("/api/v1/costs/forecast", json={"days": 45})
-    assert response.status_code == 422
+    client = TestClient(app)
+    # Out of range days are rejected
+    assert client.post("/api/v1/costs/forecast", json={"days": 0}).status_code == 422
+    assert client.post("/api/v1/costs/forecast", json={"days": 400}).status_code == 422
+    # Custom days (35, 45, etc.) succeed
+    resp_35 = client.post("/api/v1/costs/forecast", json={"days": 35})
+    assert resp_35.status_code == 200
+    assert resp_35.json()["days"] == 35
 
+
+def test_open_risk_endpoint_works_without_typesafe_key():
+    client = TestClient(app)
+    res = client.post("/api/v1/optimization/open-risk", json={"resource_id": "res-00000"})
+    assert res.status_code == 200
+    body = res.json()
+    assert "risk_assessment" in body
+    assert body["risk_assessment"]["model"] == "OpenRisk-Ordinal-v1 (Open-Source)"
+    assert body["risk_assessment"]["confidence_pct"] > 50
+
+
+def test_request_logging_middleware_adds_request_id():
+    client = TestClient(app)
+    resp = client.get("/api/v1/health")
+    assert resp.status_code == 200
+    assert "X-Request-ID" in resp.headers
 
 
 def test_smartcloud_root_health_and_ai_endpoints():

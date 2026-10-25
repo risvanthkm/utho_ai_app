@@ -8,6 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.routes import ai_router, router
 from app.config import settings
+from app.logger import RequestLoggingMiddleware
 from app.services.smartcloud_ai import AI_FEATURES
 
 
@@ -48,6 +49,7 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+app.add_middleware(RequestLoggingMiddleware)
 
 app.include_router(router)
 app.include_router(ai_router)

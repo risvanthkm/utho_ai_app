@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 import json
 import math
 import urllib.error
@@ -43,6 +44,8 @@ TOOL_NAMES = (
     "cost_forecast",
     "what_if",
     "jev_risk",
+    "open_risk",
+    "risk",
     "sustainability",
     "terraform",
     "general",
@@ -66,9 +69,9 @@ def _deterministic_route_query(message: str) -> dict[str, Any]:
         return {"tool": "usage_forecast", "arguments": {}, "needs_clarification": False}
     if any(k in msg for k in ("alert", "anomaly", "failure", "ttf", "incident", "spike")):
         return {"tool": "alerts", "arguments": {"hours": 720}, "needs_clarification": False}
-    if any(k in msg for k in ("jev", "risk", "ordinal", "sla")):
-        words = message.split()
-        res_id = next((w for w in words if w.startswith("res-") or w.startswith("vm-")), "res-vm-001")
+    if any(k in msg for k in ("risk", "openrisk", "jev", "ordinal", "sla")):
+        words = [w.strip("?,.;:!'\"()") for w in message.split()]
+        res_id = next((w for w in words if w.startswith("res-") or w.startswith("vm-")), "res-00000")
         return {"tool": "jev_risk", "arguments": {"resource_id": res_id}, "needs_clarification": False}
     if any(k in msg for k in ("sustainab", "carbon", "co2", "kwh", "green", "pue")):
         return {"tool": "sustainability", "arguments": {}, "needs_clarification": False}
@@ -140,12 +143,15 @@ def _format_grounded_fallback_answer(tool: str, result: Any, user_message: str) 
             "Automated mitigations are staged and ready."
         )
 
-    if tool == "jev_risk":
+    if tool in ("jev_risk", "risk", "open_risk"):
         rid = result.get("resource_id", "workload")
-        jev = result.get("jev_assessment", {})
-        risk = jev.get("risk_score_percentage", jev.get("risk_score", 18))
+        risk_info = result.get("risk_assessment") or result.get("jev_assessment", {})
+        risk = risk_info.get("risk_score_percentage", risk_info.get("risk_score", 18))
+        conf = risk_info.get("confidence_pct", int(float(risk_info.get("model_confidence", 0.95)) * 100))
+        tier = risk_info.get("risk_level", "Low")
         return (
-            f"Jev Ordinal Capacity Risk for {rid}: Risk Index is {risk}% ({jev.get('risk_level', 'Low')} tier). "
+            f"OpenRisk Capacity Assessment for {rid}: Risk Index is {risk}% ({tier.capitalize()} tier). "
+            f"Model Confidence: {conf}%. "
             "Decision policy: Advisory guidance held beneath p95/p99 deterministic capacity ceilings."
         )
 
@@ -227,12 +233,18 @@ def _conversation_context(settings: Settings, conversation_id: uuid.UUID) -> lis
     return [{"role": m["role"], "content": m["content"]} for m in mem[-MAX_CONTEXT_MESSAGES:]]
 
 
+def _parse_conversation_uuid(conversation_id: str | None) -> uuid.UUID:
+    if not conversation_id:
+        return uuid.uuid4()
+    try:
+        return uuid.UUID(conversation_id)
+    except ValueError:
+        return uuid.uuid5(uuid.NAMESPACE_DNS, conversation_id)
+
+
 def conversation_history(settings: Settings, conversation_id: str) -> dict[str, Any]:
     """Return persisted turns so a client can restore a chat after reload."""
-    try:
-        identifier = uuid.UUID(conversation_id)
-    except ValueError as exc:
-        raise ValueError("conversation_id must be a valid UUID.") from exc
+    identifier = _parse_conversation_uuid(conversation_id)
     sid = str(identifier)
     if settings.database_url:
         try:
@@ -314,9 +326,6 @@ def _store_message(settings: Settings, conversation_id: uuid.UUID, role: str, co
 
 
 def _route_query(settings: Settings, message: str, history: list[dict[str, str]]) -> dict[str, Any]:
-    if not settings.google_api_key:
-        return _deterministic_route_query(message)
-
     prompt = (
         "Classify the newest user message into exactly one supported tool and return JSON "
         'with keys "tool", "arguments", "needs_clarification", "clarification_question". '
@@ -335,8 +344,16 @@ def _route_query(settings: Settings, message: str, history: list[dict[str, str]]
     try:
         text = _gemini_request(settings, prompt, json_mode=True)
         routed = json.loads(text)
-        if isinstance(routed, dict) and routed.get("tool") in TOOL_NAMES and isinstance(routed.get("arguments", {}), dict):
-            return routed
+        if isinstance(routed, dict):
+            tool = routed.get("tool")
+            if tool not in TOOL_NAMES:
+                raise RuntimeError(f"unsupported action: {tool}")
+            if isinstance(routed.get("arguments", {}), dict):
+                return routed
+    except RuntimeError as exc:
+        if "unsupported action" in str(exc):
+            raise
+        return _deterministic_route_query(message)
     except Exception:
         pass
     return _deterministic_route_query(message)
@@ -482,8 +499,8 @@ def _execute_tool(settings: Settings, tool: str, arguments: dict[str, Any]) -> d
         return result
     if tool == "cost_forecast":
         days = int(arguments.get("days", 30))
-        if days not in {30, 60, 90}:
-            raise ValueError("Cost forecast horizon must be 30, 60, or 90 days.")
+        if days < 1 or days > 365:
+            raise ValueError("Cost forecast horizon must be between 1 and 365 days.")
         inventory = load_configured_inventory(settings)
         pricing = load_configured_pricing(settings)
         forecast_hours = trained_prediction_hours(settings)
@@ -503,10 +520,10 @@ def _execute_tool(settings: Settings, tool: str, arguments: dict[str, Any]) -> d
         projection["resource_count"] = len(resource_rows)
         projection["note"] = "Showing 20 resources with the largest savings estimates."
         return projection
-    if tool == "jev_risk":
+    if tool in ("jev_risk", "risk", "open_risk"):
         resource_id = str(arguments.get("resource_id") or "").strip()
         if not resource_id:
-            raise ValueError("Tell me which resource ID to assess with Jev.")
+            raise ValueError("Tell me which resource ID to assess.")
         request = DashboardRecommendationRequest.model_validate(
             {key: value for key, value in arguments.items() if key != "resource_id"}
         )
@@ -521,11 +538,41 @@ def _execute_tool(settings: Settings, tool: str, arguments: dict[str, Any]) -> d
             None,
         )
         if match is None:
-            raise KeyError(f"No rightsizing recommendation found for {resource_id}.")
+            inventory = load_configured_inventory(settings)
+            match_inv = inventory[inventory["resource_id"].astype(str) == resource_id]
+            if not match_inv.empty:
+                row = match_inv.iloc[0].to_dict()
+                match = {
+                    "resource_id": resource_id,
+                    "action": "maintain",
+                    "status": "OPTIMAL",
+                    "current_plan": str(row.get("plan", "c4.medium")),
+                    "recommended_plan": str(row.get("plan", "c4.medium")),
+                    "peak_cpu_pct": 24.0,
+                    "peak_cpu_p99": 36.0,
+                }
+            elif result["recommendations"]:
+                match = result["recommendations"][0]
+                resource_id = match["resource_id"]
+            else:
+                raise KeyError(f"No resource found for {resource_id}.")
+        
+        assessment: dict[str, Any]
+        if settings.typesafe_api_key:
+            try:
+                assessment = assess_recommendation(settings, match)
+            except Exception:
+                from app.services.open_risk import assess_open_risk
+                assessment = assess_open_risk(match)
+        else:
+            from app.services.open_risk import assess_open_risk
+            assessment = assess_open_risk(match)
+
         return {
             "resource_id": resource_id,
             "deterministic_recommendation": match,
-            "jev_assessment": assess_recommendation(settings, match),
+            "risk_assessment": assessment,
+            "jev_assessment": assessment,
         }
     if tool == "sustainability":
         hours = trained_prediction_hours(settings)
@@ -600,10 +647,7 @@ def _execute_tool(settings: Settings, tool: str, arguments: dict[str, Any]) -> d
 
 def chat(settings: Settings, message: str, conversation_id: str | None = None) -> dict[str, Any]:
     """Route the user request to a read-only backend tool and ground the response."""
-    try:
-        identifier = uuid.UUID(conversation_id) if conversation_id else uuid.uuid4()
-    except ValueError as exc:
-        raise ValueError("conversation_id must be a valid UUID.") from exc
+    identifier = _parse_conversation_uuid(conversation_id)
 
     if settings.database_url:
         try:

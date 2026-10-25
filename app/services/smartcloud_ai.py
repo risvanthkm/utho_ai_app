@@ -124,54 +124,20 @@ def _compute_jev_assessment(
     proj_cpu_p99: float,
     sample_count: int = 180,
 ) -> dict[str, Any]:
-    """Compute TypeSafe Jev ordinal risk score (0..3 -> 0..100%) and level probabilities.
+    """Compute OpenRisk capacity risk score (0..3 -> 0..100%) and level probabilities.
 
-    Uses live TypeSafe API if TYPESAFE_API_KEY is configured and responsive (<2s),
-    otherwise executes the deterministic ordinal risk model matching app/services/jev.py.
+    Uses open-source, local ordinal risk engine without external paid API dependencies.
     """
-    if status == "PROTECTED_PEAK_LOAD" or cpu_p99 >= 85.0 or proj_cpu_p99 >= 85.0:
-        score = 2.76
-        probs = {"0": 0.01, "1": 0.05, "2": 0.16, "3": 0.78}
-        level = "critical"
-        confidence = 0.97
-    elif status == "OVERPROVISIONED":
-        if proj_cpu_p95 <= 55.0:
-            score = 0.42
-            probs = {"0": 0.74, "1": 0.21, "2": 0.04, "3": 0.01}
-            level = "low"
-            confidence = 0.95
-        else:
-            score = 1.05
-            probs = {"0": 0.32, "1": 0.54, "2": 0.12, "3": 0.02}
-            level = "moderate"
-            confidence = 0.92
-    elif status in ("IDLE_SCHEDULE_CANDIDATE", "ZOMBIE", "ORPHANED"):
-        score = 0.18 if status != "ORPHANED" else 0.05
-        probs = {"0": 0.88, "1": 0.10, "2": 0.01, "3": 0.01}
-        level = "low"
-        confidence = 0.98
-    else:
-        score = 0.60
-        probs = {"0": 0.65, "1": 0.28, "2": 0.05, "3": 0.02}
-        level = "low"
-        confidence = 0.94
-
-    if sample_count < 48:
-        confidence = max(0.65, round(confidence - 0.18, 2))
-
-    return {
-        "model": settings.typesafe_model or "jev-latest",
-        "risk_score": round(score, 2),
-        "risk_score_percentage": round((score / 3.0) * 100.0, 1),
-        "risk_level": level,
-        "model_confidence": confidence,
-        "probabilities": probs,
-        "explanation": (
-            "Jev ordinal score normalized to 0-100% across 4 operational risk tiers "
-            "(0=Low, 1=Moderate, 2=High, 3=Critical) based on p95/p99 headroom and evidence coverage."
-        ),
-        "decision_policy": "Advisory only; deterministic p95/p99 capacity checks remain authoritative.",
-    }
+    from app.services.open_risk import assess_open_risk
+    return assess_open_risk(
+        recommendation={"status": status},
+        sample_count=sample_count,
+        peak_cpu_p95=cpu_p95,
+        peak_cpu_p99=cpu_p99,
+        proj_cpu_p95=proj_cpu_p95,
+        proj_cpu_p99=proj_cpu_p99,
+        proj_mem_p95=mem_p95,
+    )
 
 
 def _generate_24h_quantile_forecast(res: dict[str, Any]) -> list[dict[str, Any]]:
@@ -730,6 +696,7 @@ def parse_nl_scenario_payload(payload: dict[str, Any]) -> dict[str, Any]:
         "dev_off_hours_enabled": dev_off_hours_enabled,
         "dev_shutdown_hours_per_week": dev_shutdown_hours_per_week,
         "staging_weekend_off_enabled": staging_weekend_off_enabled,
+        "staging_shutdown_hours_per_week": 72 if staging_weekend_off_enabled else 0,
         "safety_headroom_buffer_pct": safety_headroom_buffer_pct,
         "purge_orphaned_older_than_days": purge_orphaned_older_than_days,
     }
@@ -923,8 +890,10 @@ def forecast_costs_and_usage_payload(payload: dict[str, Any]) -> dict[str, Any]:
         return _AI_CACHE[key]
 
     days = int(payload.get("days") or 30)
-    if days not in (30, 60, 90):
+    if days <= 0:
         days = 30
+    elif days > 365:
+        days = 365
     headroom = float(payload.get("headroom") or 1.25)
     scale = days / 30.0
 

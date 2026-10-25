@@ -45,7 +45,7 @@ class JevRiskRequest(APIModel):
 
 
 class CostForecastRequest(APIModel):
-    days: Literal[30, 60, 90] = 30
+    days: int = Field(default=30, ge=1, le=365)
     headroom: float = Field(default=1.30, ge=1.0, le=3.0)
 
 
