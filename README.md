@@ -4,7 +4,7 @@
 
 ---
 
-## 🏛️ 3-Repository System Architecture
+## 3-Repository System Architecture
 
 | Repository | Tech Stack | Port | Responsibility |
 | :--- | :--- | :--- | :--- |
@@ -14,7 +14,7 @@
 
 ---
 
-## ⚡ Full-Stack Setup Instructions (All 3 Repos)
+## Full-Stack Setup Instructions (All 3 Repos)
 
 ### 1. Start Python AI & Forecasting Service (`utho_ai_app` — Port `:8001`)
 ```bash
@@ -48,7 +48,7 @@ npm run dev
 
 ---
 
-## 🧠 Core AI & ML Capabilities (For Jury Review)
+## Core AI & ML Capabilities (For Jury Review)
 
 ### 1. Pooled Temporal Fusion Transformer (TFT) Forecasting (`app/services/forecasting.py`, `smartcloud_ai.py`)
 - Learns pooled multi-horizon representations across VM telemetry with `P10`, `P50`, and `P90` quantile heads (`PinballLoss`).
@@ -68,7 +68,7 @@ npm run dev
 
 ---
 
-## 🔌 Key API Endpoints
+## Key API Endpoints
 
 | Method & Path | Purpose |
 | :--- | :--- |
@@ -85,7 +85,7 @@ npm run dev
 
 ---
 
-## 🧪 Verification & Test Suite
+## Verification & Test Suite
 
 ```bash
 pytest

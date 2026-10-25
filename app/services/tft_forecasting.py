@@ -13,9 +13,9 @@ import torch.nn as nn
 
 
 class QuantileTemporalTransformer(nn.Module):
-    """Compact Temporal Quantile Transformer for Multi-Horizon P10/P50/P90 forecasting."""
+    """Compact Temporal Quantile Transformer with per-series standardization & residual quantile heads."""
 
-    def __init__(self, in_features: int = 4, hidden_dim: int = 48, n_heads: int = 4, pred_len: int = 40):
+    def __init__(self, in_features: int = 4, hidden_dim: int = 48, n_heads: int = 4, pred_len: int = 90):
         super().__init__()
         self.pred_len = pred_len
         self.embedding = nn.Linear(in_features, hidden_dim)
@@ -29,12 +29,22 @@ class QuantileTemporalTransformer(nn.Module):
         self.head_p90 = nn.Linear(hidden_dim, pred_len)
 
     def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        h = self.embedding(x) + self.pos_encoder
+        # Per-series standardization across the 14-day encoder window
+        seq_mean = x.mean(dim=1, keepdim=True)
+        seq_std = torch.clamp(x.std(dim=1, keepdim=True, unbiased=False), min=1e-2)
+        x_norm = (x - seq_mean) / seq_std
+
+        # Target anchor & scale (feature 0 = cpu_mean)
+        anchor = seq_mean[:, :, 0]  # (B, 1)
+        scale = seq_std[:, :, 0]    # (B, 1)
+
+        h = self.embedding(x_norm) + self.pos_encoder
         h = self.transformer(h)
         pooled = h[:, -1, :]
-        p10 = self.head_p10(pooled)
-        p50 = self.head_p50(pooled)
-        p90 = self.head_p90(pooled)
+
+        p10 = anchor + self.head_p10(pooled) * scale
+        p50 = anchor + self.head_p50(pooled) * scale
+        p90 = anchor + self.head_p90(pooled) * scale
 
         p50_adj = torch.maximum(p50, p10)
         p90_adj = torch.maximum(p90, p50_adj)
@@ -76,8 +86,14 @@ def load_model() -> tuple[QuantileTemporalTransformer | None, dict | None]:
 
     try:
         meta = json.loads(meta_path.read_text(encoding="utf-8"))
-        model = QuantileTemporalTransformer(in_features=4, hidden_dim=48, n_heads=4, pred_len=40)
-        state_dict = torch.load(ckpt, map_location="cpu")
+        pred_len = int(meta.get("prediction_days", 90))
+        hidden_dim = int(meta.get("hidden_dim", 48))
+        n_heads = int(meta.get("n_heads", 4))
+        in_features = int(meta.get("in_features", 4))
+        model = QuantileTemporalTransformer(
+            in_features=in_features, hidden_dim=hidden_dim, n_heads=n_heads, pred_len=pred_len
+        )
+        state_dict = torch.load(ckpt, map_location="cpu", weights_only=True)
         model.load_state_dict(state_dict)
         model.eval()
         _cached_model = model
@@ -94,22 +110,23 @@ def generate_forecast(
     accepted_savings_inr_per_month: float = 0.0,
 ) -> dict:
     """Predict P10/P50/P90 cost horizons strictly without random scaling."""
-    if horizon_days not in (30, 35, 40):
-        # Allow clamped default if outside documented options
-        horizon_days = min(40, max(30, horizon_days))
-
     model, meta = load_model()
     if model is None or meta is None:
         raise RuntimeError("TFT checkpoint missing or failed to load. Models must be trained first.")
 
-    # Load recent history to construct encoder tensor
+    max_pred = int(model.pred_len)
+    if horizon_days not in (30, 35, 40, 60, 90):
+        horizon_days = min(max_pred, max(7, int(horizon_days)))
+    else:
+        horizon_days = min(max_pred, int(horizon_days))
+
     parquet_path = PROJECT_ROOT / "data" / "history.parquet"
     if not parquet_path.is_file():
         parquet_path = PROJECT_ROOT / "datasets" / "raw" / "telemetry.parquet"
 
     df = pd.read_parquet(parquet_path)
-    df["ts"] = pd.to_datetime(df["ts"])
-    df["day"] = df["ts"].dt.floor("1D")
+    ts_col = "ts" if "ts" in df.columns else "timestamp"
+    df["day"] = pd.to_datetime(df[ts_col]).dt.floor("1D")
 
     daily = df.groupby(["day"]).agg({
         "cpu_utilization_pct": ["mean", "max"],
@@ -123,7 +140,6 @@ def generate_forecast(
         reps = int(np.ceil(14 / len(series)))
         series = np.tile(series, (reps, 1))
 
-    # Encoder input: last 14 days
     x_enc = torch.tensor(series[-14:], dtype=torch.float32).unsqueeze(0)
 
     with torch.no_grad():
@@ -132,33 +148,27 @@ def generate_forecast(
         p50_arr = p50[0, :horizon_days].numpy()
         p90_arr = p90[0, :horizon_days].numpy()
 
-    # Enforce strict quantile ordering
     p50_arr = np.maximum(p50_arr, p10_arr)
     p90_arr = np.maximum(p90_arr, p50_arr)
 
-    # Convert quantile utilization to daily baseline monetary spend
     daily_base = current_monthly_spend_inr / 30.0
-    # Mean normalized scale around current spend
     mean_u = float(np.mean(series[-14:, 0])) if np.mean(series[-14:, 0]) > 0 else 20.0
 
     b_p10 = [round(float(daily_base * (1.0 + (p10_arr[i] - mean_u) / 100.0 * 0.5)), 2) for i in range(horizon_days)]
     b_p50 = [round(float(daily_base * (1.0 + (p50_arr[i] - mean_u) / 100.0 * 0.5)), 2) for i in range(horizon_days)]
     b_p90 = [round(float(daily_base * (1.0 + (p90_arr[i] - mean_u) / 100.0 * 0.5)), 2) for i in range(horizon_days)]
 
-    # Strictly enforce b_p10 <= b_p50 <= b_p90
     for i in range(horizon_days):
         if b_p50[i] < b_p10[i]:
             b_p50[i] = b_p10[i]
         if b_p90[i] < b_p50[i]:
             b_p90[i] = b_p50[i]
 
-    # Daily savings subtracted directly from baseline (not random scaling!)
     daily_savings = max(0.0, accepted_savings_inr_per_month / 30.0)
     opt_p10 = [round(max(0.0, b_p10[i] - daily_savings), 2) for i in range(horizon_days)]
     opt_p50 = [round(max(0.0, b_p50[i] - daily_savings), 2) for i in range(horizon_days)]
     opt_p90 = [round(max(0.0, b_p90[i] - daily_savings), 2) for i in range(horizon_days)]
 
-    # Generate dates
     start_dt = datetime.now(timezone.utc).date() + timedelta(days=1)
     dates = [(start_dt + timedelta(days=i)).isoformat() for i in range(horizon_days)]
 
