@@ -54,16 +54,17 @@ services:
       GRID_CARBON_KG_PER_KWH: ${GRID_CARBON_KG_PER_KWH:-0.71}
     volumes:
       - ./datasets/raw:/app/datasets/raw:ro
-      - model_data:/app/models
+      - ./models:/app/models:ro
+      - ./data:/app/data:ro
     depends_on:
       timescale-db:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8001/health', timeout=3)"]
-      interval: 10s
-      timeout: 4s
-      retries: 5
-      start_period: 15s
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8001/health', timeout=5)"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 40s
     networks:
       - smartcloud-net
     restart: unless-stopped

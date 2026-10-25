@@ -12,3 +12,4 @@ pyarrow>=14.0
 torch>=2.0
 pytorch-forecasting>=1.0
 psycopg[binary]>=3.2
+google-genai>=0.1.1

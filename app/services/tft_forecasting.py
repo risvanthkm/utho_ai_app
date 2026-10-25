@@ -3,13 +3,43 @@
 from __future__ import annotations
 
 import json
+import os
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import numpy as np
 import pandas as pd
 import torch
+import torch.nn as nn
 
-from scripts.train_tft import QuantileTemporalTransformer
+
+class QuantileTemporalTransformer(nn.Module):
+    """Compact Temporal Quantile Transformer for Multi-Horizon P10/P50/P90 forecasting."""
+
+    def __init__(self, in_features: int = 4, hidden_dim: int = 48, n_heads: int = 4, pred_len: int = 40):
+        super().__init__()
+        self.pred_len = pred_len
+        self.embedding = nn.Linear(in_features, hidden_dim)
+        self.pos_encoder = nn.Parameter(torch.zeros(1, 14, hidden_dim))
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model=hidden_dim, nhead=n_heads, dim_feedforward=hidden_dim * 2, batch_first=True
+        )
+        self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=2)
+        self.head_p10 = nn.Linear(hidden_dim, pred_len)
+        self.head_p50 = nn.Linear(hidden_dim, pred_len)
+        self.head_p90 = nn.Linear(hidden_dim, pred_len)
+
+    def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        h = self.embedding(x) + self.pos_encoder
+        h = self.transformer(h)
+        pooled = h[:, -1, :]
+        p10 = self.head_p10(pooled)
+        p50 = self.head_p50(pooled)
+        p90 = self.head_p90(pooled)
+
+        p50_adj = torch.maximum(p50, p10)
+        p90_adj = torch.maximum(p90, p50_adj)
+        return p10, p50_adj, p90_adj
+
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 CKPT_PATH = PROJECT_ROOT / "models" / "tft.ckpt"
@@ -19,18 +49,35 @@ _cached_model: QuantileTemporalTransformer | None = None
 _cached_meta: dict | None = None
 
 
+def _find_checkpoint_files() -> tuple[Path | None, Path | None]:
+    candidates = [
+        (CKPT_PATH, META_PATH),
+        (Path("/app/models/tft.ckpt"), Path("/app/models/tft_meta.json")),
+    ]
+    env_dir = os.environ.get("MODEL_DIR")
+    if env_dir:
+        candidates.append((Path(env_dir).parent / "tft.ckpt", Path(env_dir).parent / "tft_meta.json"))
+        candidates.append((Path(env_dir) / "tft.ckpt", Path(env_dir) / "tft_meta.json"))
+
+    for c, m in candidates:
+        if c.is_file() and m.is_file():
+            return c, m
+    return None, None
+
+
 def load_model() -> tuple[QuantileTemporalTransformer | None, dict | None]:
     global _cached_model, _cached_meta
     if _cached_model is not None and _cached_meta is not None:
         return _cached_model, _cached_meta
 
-    if not CKPT_PATH.is_file() or not META_PATH.is_file():
+    ckpt, meta_path = _find_checkpoint_files()
+    if ckpt is None or meta_path is None:
         return None, None
 
     try:
-        meta = json.loads(META_PATH.read_text(encoding="utf-8"))
+        meta = json.loads(meta_path.read_text(encoding="utf-8"))
         model = QuantileTemporalTransformer(in_features=4, hidden_dim=48, n_heads=4, pred_len=40)
-        state_dict = torch.load(CKPT_PATH, map_location="cpu")
+        state_dict = torch.load(ckpt, map_location="cpu")
         model.load_state_dict(state_dict)
         model.eval()
         _cached_model = model

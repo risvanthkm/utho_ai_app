@@ -14,14 +14,14 @@ RUN python -m pip install --upgrade pip \
 
 COPY app ./app
 COPY db ./db
-COPY datasets/raw/inventory.csv ./datasets/raw/inventory.csv
-COPY datasets/raw/pricing.csv ./datasets/raw/pricing.csv
-
-RUN mkdir -p /app/models/tft
+COPY models ./models
+COPY data ./data
+COPY scripts ./scripts
+COPY datasets ./datasets
 
 EXPOSE 8001
 
-HEALTHCHECK --interval=10s --timeout=4s --start-period=15s --retries=5 \
-    CMD python -c "import os, urllib.request; port = os.getenv('PORT', '8001'); urllib.request.urlopen(f'http://127.0.0.1:{port}/health', timeout=3)" || exit 1
+HEALTHCHECK --interval=5s --timeout=5s --start-period=45s --retries=10 \
+    CMD python -c "import os, urllib.request; port = os.getenv('PORT', '8001'); urllib.request.urlopen(f'http://127.0.0.1:{port}/health', timeout=4)" || exit 1
 
 CMD ["sh", "-c", "uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8001}"]

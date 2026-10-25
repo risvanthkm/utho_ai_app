@@ -34,8 +34,12 @@ def _get_gemini_client():
     api_key = os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY")
     if not api_key:
         return None
-    from google import genai
-    return genai.Client(api_key=api_key)
+    try:
+        from google import genai
+        return genai.Client(api_key=api_key)
+    except Exception as exc:
+        print(f"Gemini client initialization warning: {exc}")
+        return None
 
 
 def build_knowledge_chunks() -> list[dict[str, Any]]:

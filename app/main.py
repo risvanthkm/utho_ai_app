@@ -74,10 +74,21 @@ def root_health() -> dict[str, Any]:
     if "timescaledb_telemetry" not in all_features:
         all_features.append("timescaledb_telemetry")
 
-    from app.services.tft_forecasting import load_model
-    model, _ = load_model()
-    from app.services.rag_service import _rag_chunks
-    rag_size = len(_rag_chunks)
+    model_loaded = False
+    try:
+        from app.services.tft_forecasting import load_model
+        model, _ = load_model()
+        model_loaded = model is not None
+    except Exception as exc:
+        print(f"Healthcheck model warning: {exc}")
+
+    rag_size = 0
+    try:
+        from app.services.rag_service import _rag_chunks
+        rag_size = len(_rag_chunks)
+    except Exception as exc:
+        print(f"Healthcheck RAG warning: {exc}")
+
     api_key = os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY") or settings.google_api_key
 
     return {
@@ -87,7 +98,7 @@ def root_health() -> dict[str, Any]:
         "database_connected": db_connected,
         "db_connected": db_connected,
         "llm_configured": bool(api_key),
-        "forecast_model_loaded": model is not None,
+        "forecast_model_loaded": model_loaded,
         "rag_index_size": rag_size,
         "features": all_features,
     }

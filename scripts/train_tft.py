@@ -12,40 +12,9 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, TensorDataset
 
+from app.services.tft_forecasting import QuantileTemporalTransformer
+
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-
-
-class QuantileTemporalTransformer(nn.Module):
-    """Compact Temporal Quantile Transformer for Multi-Horizon P10/P50/P90 forecasting."""
-
-    def __init__(self, in_features: int = 4, hidden_dim: int = 48, n_heads: int = 4, pred_len: int = 40):
-        super().__init__()
-        self.pred_len = pred_len
-        self.embedding = nn.Linear(in_features, hidden_dim)
-        self.pos_encoder = nn.Parameter(torch.zeros(1, 14, hidden_dim))
-        encoder_layer = nn.TransformerEncoderLayer(
-            d_model=hidden_dim, nhead=n_heads, dim_feedforward=hidden_dim * 2, batch_first=True
-        )
-        self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=2)
-        # 3 quantiles: P10, P50, P90
-        self.head_p10 = nn.Linear(hidden_dim, pred_len)
-        self.head_p50 = nn.Linear(hidden_dim, pred_len)
-        self.head_p90 = nn.Linear(hidden_dim, pred_len)
-
-    def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        # x: [B, 14, in_features]
-        h = self.embedding(x) + self.pos_encoder
-        h = self.transformer(h)
-        # Pool across sequence length: take last timestep
-        pooled = h[:, -1, :]
-        p10 = self.head_p10(pooled)
-        p50 = self.head_p50(pooled)
-        p90 = self.head_p90(pooled)
-
-        # Enforce monotonic quantile invariant: p10 <= p50 <= p90
-        p50_adj = torch.maximum(p50, p10)
-        p90_adj = torch.maximum(p90, p50_adj)
-        return p10, p50_adj, p90_adj
 
 
 def quantile_loss(preds: torch.Tensor, target: torch.Tensor, q: float) -> torch.Tensor:
