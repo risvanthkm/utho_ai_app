@@ -93,11 +93,14 @@ def chat(
             ctx["resource_count"] = len(extra_context["resources"])
 
     history = _IN_MEMORY_CONVERSATIONS.get(cid, [])
-    from app.services.rag_service import retrieve
+    from app.services.rag_service import retrieve, synthesize_from_full_context_with_telemetry
     raw_sources = ctx.get("sources") if isinstance(ctx.get("sources"), list) else [{"id": r["id"], "title": r["title"]} for r in retrieve(message, top_k=6)]
+    is_full_fleet_ctx = "resources" in ctx or "recommendations" in ctx
+    synth_ans, telemetry_card = synthesize_from_full_context_with_telemetry(message, ctx) if is_full_fleet_ctx else ("", ctx)
+    response_data = telemetry_card if is_full_fleet_ctx else ctx
 
     if not settings.google_api_key:
-        answer = _fallback_chat_answer(ctx, gemini_configured=False, message=message)
+        answer = synth_ans if is_full_fleet_ctx else _fallback_chat_answer(ctx, gemini_configured=False, message=message)
         if cid not in _IN_MEMORY_CONVERSATIONS:
             _IN_MEMORY_CONVERSATIONS[cid] = []
         _IN_MEMORY_CONVERSATIONS[cid].append({"role": "user", "content": message})
@@ -108,7 +111,7 @@ def chat(
             "reply": answer,
             "sources": raw_sources[:6],
             "tool": "rag_gemini_3_8_flash",
-            "data": ctx,
+            "data": response_data,
             "model": "retrieved-only" if "30_day_current_cost_estimate" in ctx else model_name,
         }
 
@@ -129,7 +132,7 @@ def chat(
     try:
         answer = _gemini_request(settings, full_prompt)
     except Exception:
-        answer = _fallback_chat_answer(ctx, gemini_configured=True, message=message)
+        answer = synth_ans if is_full_fleet_ctx else _fallback_chat_answer(ctx, gemini_configured=True, message=message)
 
     if cid not in _IN_MEMORY_CONVERSATIONS:
         _IN_MEMORY_CONVERSATIONS[cid] = []
@@ -142,7 +145,7 @@ def chat(
         "reply": answer,
         "sources": raw_sources[:6],
         "tool": "structured_rag_retrieval",
-        "data": ctx,
+        "data": response_data,
         "model": model_name,
     }
 
