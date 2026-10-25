@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from typing import Any
 
 import pandas as pd
@@ -107,6 +108,31 @@ def _scenario_values(request: ScenarioRequest) -> dict[str, Any]:
 @router.get("/health")
 def health() -> dict[str, str]:
     return {"status": "ok"}
+
+
+@router.get("/forecast")
+@router.post("/forecast")
+@ai_router.get("/forecast")
+@ai_router.post("/forecast")
+def forecast_endpoint(
+    days: int = 30,
+    accepted_savings_inr_per_month: float = 0.0,
+    current_monthly_spend_inr: float = 683200.0,
+    payload: dict[str, Any] = Body(default_factory=dict),
+) -> dict[str, Any]:
+    horizon = int(payload.get("horizon_days") or payload.get("days") or days)
+    accepted_savings = float(payload.get("accepted_savings_inr_per_month") or payload.get("accepted_savings_inr") or accepted_savings_inr_per_month)
+    current_spend = float(payload.get("current_monthly_spend_inr") or current_monthly_spend_inr)
+    try:
+        from app.services.tft_forecasting import generate_forecast
+        return generate_forecast(
+            horizon_days=horizon,
+            current_monthly_spend_inr=current_spend,
+            accepted_savings_inr_per_month=accepted_savings,
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
 
 
 @ai_router.post("/chat")
@@ -457,8 +483,24 @@ def explain_resource_endpoint(
 
 
 @router.post("/ai/parse-scenario")
+@ai_router.post("/ai/parse-scenario")
 def parse_scenario_endpoint(payload: dict[str, Any] = Body(default_factory=dict)) -> dict[str, Any]:
-    return parse_nl_scenario_payload(payload)
+    query = str(payload.get("query") or payload.get("scenario_text") or "").strip()
+    try:
+        from app.services.rag_service import parse_scenario_structured
+        data = parse_scenario_structured(query)
+        detected_scope = {
+            "region": data.get("target_region"),
+            "environment": data.get("target_environment"),
+        }
+        return {
+            "status": "ok",
+            "parsed": data,
+            "parsed_params": data,
+            "detected_scope": detected_scope,
+        }
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
 
 
 @router.post("/ai/correlate-alerts")

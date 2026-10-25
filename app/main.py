@@ -57,6 +57,7 @@ app.include_router(ai_router)
 
 @app.get("/health")
 def root_health() -> dict[str, Any]:
+    import os
     db_connected = False
     if settings.database_url:
         try:
@@ -73,11 +74,21 @@ def root_health() -> dict[str, Any]:
     if "timescaledb_telemetry" not in all_features:
         all_features.append("timescaledb_telemetry")
 
+    from app.services.tft_forecasting import load_model
+    model, _ = load_model()
+    from app.services.rag_service import _rag_chunks
+    rag_size = len(_rag_chunks)
+    api_key = os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY") or settings.google_api_key
+
     return {
         "status": "ok",
         "service": "smartcloud-ai-engine",
         "port": 8001,
         "database_connected": db_connected,
+        "db_connected": db_connected,
+        "llm_configured": bool(api_key),
+        "forecast_model_loaded": model is not None,
+        "rag_index_size": rag_size,
         "features": all_features,
     }
 

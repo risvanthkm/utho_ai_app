@@ -149,6 +149,10 @@ def _load_panel(
             raise ValueError("No VM telemetry matched the configured inventory.")
         panel = aggregated.to_pandas()
     panel["timestamp"] = pd.to_datetime(panel["timestamp"], errors="raise")
+    if panel["timestamp"].dt.tz is not None:
+        panel["timestamp"] = panel["timestamp"].dt.tz_localize(None)
+    if start_time is not None and getattr(start_time, "tzinfo", None) is not None:
+        start_time = start_time.tz_localize(None)
     panel = panel.merge(
         vm_inventory[
             ["resource_id", "plan", "region", "environment", "vcpu", "ram_gb", "type", "team"]

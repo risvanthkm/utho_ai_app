@@ -101,6 +101,10 @@ def load_telemetry(path: Path, resource_ids: list[str] | None = None) -> pd.Data
         frame = pd.read_csv(path)
     else:
         raise ValueError("Telemetry dataset must be a .parquet or .csv file.")
+    if "ts" in frame.columns and "timestamp" not in frame.columns:
+        frame["timestamp"] = frame["ts"]
+    elif "timestamp" in frame.columns and "ts" not in frame.columns:
+        frame["ts"] = frame["timestamp"]
     required = {
         "resource_id",
         "timestamp",
