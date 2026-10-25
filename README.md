@@ -200,24 +200,28 @@ files or training logs.
 ### Chatbot and database
 
 `POST /api/v1/chat` accepts `{"message":"...","conversation_id":null}`. It
-returns an answer, the tool used, supporting data, and a conversation ID. Send
-that ID on the next request to continue the same conversation. Chat turns are
-stored in PostgreSQL. Gemini classifies the request into a fixed allowlist of
-read-only application tools; the backend executes the existing data/forecast/
-simulation services and then asks Gemini to explain those results. The model
-does not generate SQL or execute cloud changes.
+returns an answer, retrieved supporting data, and a conversation ID. Send that
+ID on the next request to continue the same conversation. Chat turns are stored
+in PostgreSQL. Each turn retrieves a current structured evidence bundle from
+inventory, pricing, recent telemetry, capacity recommendations, alerts, and
+trained forecasts when available. Gemini answers the user's question directly
+from this evidence and recent conversation; it does not route the question to a
+tool, generate SQL, or execute cloud changes. This is retrieval-grounded
+conversational answering over structured operational data, not vector/embedding
+search.
 
 Supported intents include resource list/filter, per-resource or fleet history,
 dashboard summaries, historical or forecast-based rightsizing, alerts, TFT
 forecasts, cost projections, sustainability estimates, optional Jev assessments,
 Terraform text generation when its required inputs are supplied, and
-natural-language shutdown scenarios. Chart history is
-automatically downsampled to at most 1,200 points per chatbot response. If the
-request needs an unavailable model checkpoint, telemetry, resource ID, or
-scenario details, the API reports that limitation rather than fabricating a
-result. Set `GOOGLE_API_KEY` to enable chat; set `DATABASE_URL` because
-conversation history is persisted there. This repository contains the backend
-API; a web-client chat panel must call the API and retain the conversation ID.
+natural-language shutdown scenarios. Chart history is automatically
+downsampled to at most 1,200 points per chatbot response. If a trained forecast
+checkpoint or telemetry source is unavailable, the retrieved context marks
+that section unavailable rather than fabricating a result. Without
+`GOOGLE_API_KEY`, the API still retrieves data but uses a short deterministic
+status response instead of a generated conversational answer. Set
+`DATABASE_URL` to persist conversation history. The web client should retain
+and send the returned conversation ID for follow-up questions.
 
 ```bash
 curl -X POST 'http://127.0.0.1:8000/api/v1/chat' \
