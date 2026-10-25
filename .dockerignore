@@ -11,5 +11,5 @@ forecast_output
 outputs
 datasets/raw/telemetry.parquet
 datasets/generated
-models
+
 tests

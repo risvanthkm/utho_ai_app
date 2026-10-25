@@ -17,7 +17,8 @@ COPY db ./db
 COPY models ./models
 COPY data ./data
 COPY scripts ./scripts
-COPY datasets ./datasets
+COPY datasets/raw/inventory.csv ./datasets/raw/inventory.csv
+COPY datasets/raw/pricing.csv ./datasets/raw/pricing.csv
 
 EXPOSE 8001
 
