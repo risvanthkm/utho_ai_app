@@ -772,15 +772,18 @@ def synthesize_from_full_context_with_telemetry(message: str, ctx: dict[str, Any
 
     # 9. Forecast / TFT / P10 / P50 / P90 / 30d / 60d / 90d / MAE questions
     if any(k in q for k in ("forecast", "tft", "p10", "p50", "p90", "quantile", "30 day", "60 day", "90 day", "30d", "60d", "90d", "mae", "predict")):
-        b30, o30 = cur_spend, proj_spend
-        b60, o60 = cur_spend * 2, proj_spend * 2
-        b90, o90 = cur_spend * 3, proj_spend * 3
+        eff_sav = acc_sav if acc_sav > 0 else tot_sav
+        eff_proj = max(0.0, cur_spend - eff_sav)
+        basis_lbl = "Approved" if acc_sav > 0 else "Full Optimization Potential"
+        b30, o30 = cur_spend, eff_proj
+        b60, o60 = cur_spend * 2, eff_proj * 2
+        b90, o90 = cur_spend * 3, eff_proj * 3
         ans = (
-            f"TFT Multi-Horizon Quantile Forecast (`QuantileTemporalTransformer-90d`):\n"
+            f"TFT Multi-Horizon Quantile Forecast (`QuantileTemporalTransformer-90d` · {basis_lbl}):\n"
             f"• Model Accuracy: Validation MAE = {tft.get('val_mae', 0.5722)} vs. Seasonal-Naive Baseline MAE = {tft.get('baseline_mae', 0.8715)} (-34.3% lower error).\n"
-            f"• 30-Day Forecast: Baseline ₹{b30:,.0f} -> Optimized P50 ₹{o30:,.0f} (P10: ₹{o30*0.91:,.0f}, P90: ₹{o30*1.09:,.0f}) | Net Saved: ₹{acc_sav:,.0f}.\n"
-            f"• 60-Day Forecast: Baseline ₹{b60:,.0f} -> Optimized P50 ₹{o60:,.0f} (P10: ₹{o60*0.91:,.0f}, P90: ₹{o60*1.09:,.0f}) | Net Saved: ₹{acc_sav*2:,.0f}.\n"
-            f"• 90-Day Forecast: Baseline ₹{b90:,.0f} -> Optimized P50 ₹{o90:,.0f} (P10: ₹{o90*0.91:,.0f}, P90: ₹{o90*1.09:,.0f}) | Net Saved: ₹{acc_sav*3:,.0f}."
+            f"• 30-Day Forecast: Baseline ₹{b30:,.0f} -> Optimized P50 ₹{o30:,.0f} (P10: ₹{o30*0.91:,.0f}, P90: ₹{o30*1.09:,.0f}) | Net Saved: ₹{eff_sav:,.0f}.\n"
+            f"• 60-Day Forecast: Baseline ₹{b60:,.0f} -> Optimized P50 ₹{o60:,.0f} (P10: ₹{o60*0.91:,.0f}, P90: ₹{o60*1.09:,.0f}) | Net Saved: ₹{eff_sav*2:,.0f}.\n"
+            f"• 90-Day Forecast: Baseline ₹{b90:,.0f} -> Optimized P50 ₹{o90:,.0f} (P10: ₹{o90*0.91:,.0f}, P90: ₹{o90*1.09:,.0f}) | Net Saved: ₹{eff_sav*3:,.0f}."
         )
         return ans, {
             "model_architecture": "QuantileTemporalTransformer-90d",
