@@ -1,431 +1,93 @@
-# Cloud Resource Advisor
+# FinSort — Python AI, TFT Forecasting & SRE Intelligence (`utho_ai_app`)
 
-FastAPI backend for forecasting VM utilization, estimating resource costs,
-recommending VM sizes and shutdown schedules, simulating what-if scenarios,
-estimating sustainability impact, generating Terraform, and optionally creating
-plain-language summaries with Google AI.
+> **Jury Overview:** `utho_ai_app` is the AI, machine-learning forecasting, and SRE root-cause intelligence microservice for **FinSort** on **Utho Cloud** (`in-mumbai-1`, `in-noida-1`, `in-bangalore-1`). It provides **Temporal Fusion Transformer (TFT) P10/P50/P90 quantile usage & cost forecasting**, **SRE telemetry audits with mathematical headroom proofs**, **ordinal capacity risk scoring (Jev)**, **natural-language What-If scenario parsing**, **Terraform HCL generation**, and a **retrieval-grounded FinOps Copilot** powered by Google Gemini.
 
-The service does **not** connect to a cloud account, stop instances, or apply
-Terraform. Cost, power, and carbon outputs are estimates based on the supplied
-inventory, price catalog, telemetry, and documented assumptions.
+---
 
-## Project layout
+## 🏛️ 3-Repository System Architecture
 
-```text
-app/
-  api/routes.py             HTTP endpoints and request handling
-  config.py                 Environment-based paths and service settings
-  data.py                   Dataset loading and schema checks
-  database.py               PostgreSQL queries and dataframe loading
-  seed.py                   CSV/Parquet to PostgreSQL/TimescaleDB importer
-  main.py                   FastAPI application
-  schemas.py                Validated API request and response models
-  services/
-    descriptions.py         Optional Google Gemini API integration
-    forecasting.py          Pooled TFT training and inference
-    optimization.py         Plan selection and cost calculations
-    scenarios.py            Shutdown what-if simulation
-    sustainability.py       Energy/carbon estimates
-    terraform.py            Terraform text generation
-    dashboard.py            Dashboard metrics, historical percentiles, alerts
-    jev.py                  Optional TypeSafe Jev risk assessment
-datasets/
-  raw/                      Put input inventory, pricing, and telemetry here
-  generated/                Optional local/generated data; ignored by Git
-db/init/                    PostgreSQL and TimescaleDB schema
-models/                     Locally trained checkpoints; ignored by Git
-tests/                      Unit and API tests
-```
+| Repository | Tech Stack | Port | Responsibility |
+| :--- | :--- | :--- | :--- |
+| **`utho_ai_app`** *(this repo)* | Python 3.11+, FastAPI, PyTorch TFT, Google Gemini | `:8001` | Pooled TFT `P10/P50/P90` forecasting, SRE root-cause audits, Jev ordinal risk, NL What-If parser & grounded chat |
+| **`utho_backend`** | Go 1.22+ (`net/http`), `sync.RWMutex` Seed 42 Store | `:8080` | Core FinOps REST API, `p95`/`p99` peak-safety optimizer, What-If engine, Terraform/CLI exporter, AI proxy |
+| **`utho_frontend`** | React 19, TypeScript, Vite 8, Tailwind CSS 4 | `:5173` | Executive FinOps Dashboard, Resource Drill-Down, Recommendations, Forecast, What-If & Terraform Modal |
 
-## Setup
+---
 
-Use Python 3.11 or newer. For a CPU-only machine, install the matching CPU
-PyTorch wheel before the other dependencies:
+## ⚡ Full-Stack Setup Instructions (All 3 Repos)
 
+### 1. Start Python AI & Forecasting Service (`utho_ai_app` — Port `:8001`)
 ```bash
+cd utho_ai_app
 python -m venv .venv
-source .venv/bin/activate
+# Windows: .venv\Scripts\activate | macOS/Linux: source .venv/bin/activate
 python -m pip install --upgrade pip
-python -m pip install --index-url https://download.pytorch.org/whl/cpu torch
-python -m pip install -r requirements.txt
-cp .env.example .env
+pip install -r requirements.txt
+cp .env.example .env   # Optional: set GOOGLE_API_KEY for live Gemini chat synthesis
+
+# Run on port 8001 (expected by utho_backend)
+uvicorn app.main:app --host 0.0.0.0 --port 8001
 ```
+- **Interactive Swagger Docs:** `http://localhost:8001/docs`
+- **Healthcheck:** `GET http://localhost:8001/healthz` and `GET http://localhost:8001/api/v1/health`
 
-Put your own input files in `datasets/raw/` or set `INVENTORY_PATH`,
-`PRICING_PATH`, and `TELEMETRY_PATH` in `.env`. No resource IDs, sample
-inventory, or generated telemetry are hardcoded in the application. The
-inventory and pricing CSVs in `datasets/raw/` are replaceable examples.
-Telemetry is not committed because it can be large; provide it at the configured
-path or set `TELEMETRY_PATH`. The API accepts CSV inventory/pricing and CSV or
-Parquet telemetry.
-
-Start the API:
-
+### 2. Start Go FinOps Engine & API (`utho_backend` — Port `:8080`)
 ```bash
-uvicorn app.main:app --reload --env-file .env
+cd utho_backend
+go run ./cmd/server
+# Binds to http://localhost:8080
 ```
 
-For CSV/Parquet-only local mode, leave `DATABASE_URL` unset in `.env`. To use
-the Compose database from a host-run API process, set its URL host to
-`localhost` (Compose service hostnames such as `db` resolve only inside the
-Compose network).
-
-Open interactive API docs at `http://127.0.0.1:8000/docs`; health check is
-`GET /api/v1/health`.
-
-## Run with Docker Compose
-
-Install Docker Engine and the Docker Compose plugin. Keep inventory, pricing,
-and telemetry in `datasets/raw/`; Compose mounts them read-only, so the large
-telemetry file is not copied into the image.
-
+### 3. Start React FinOps Frontend (`utho_frontend` — Port `:5173`)
 ```bash
-cp .env.example .env
-docker compose up -d db
-docker compose --profile seed run --rm seed
-docker compose up --build api
+cd utho_frontend
+npm install
+npm run dev
+# Open http://localhost:5173
 ```
 
-The seed service imports `inventory.csv`, `pricing.csv`, and
-`telemetry.parquet`; telemetry is loaded in batches. Re-running the importer
-upserts rows by resource and timestamp. The API is available at
-`http://localhost:8000/docs`. Set `GOOGLE_API_KEY` in `.env` to enable the
-chatbot. Change the example PostgreSQL password before exposing the stack
-beyond local development. Stop services with `docker compose down`; database
-contents and trained models remain in named volumes. Remove them with
-`docker compose down --volumes`.
+---
 
-When `DATABASE_URL` is configured, the application reads inventory, pricing,
-dashboard/history/alert telemetry, and TFT training inputs from PostgreSQL /
-TimescaleDB. Without it, local development retains the CSV/Parquet data path.
+## 🧠 Core AI & ML Capabilities (For Jury Review)
 
-To build and run the API image without Compose, first ensure the configured
-datasets exist in `datasets/raw/`, then run:
+### 1. Pooled Temporal Fusion Transformer (TFT) Forecasting (`app/services/forecasting.py`, `smartcloud_ai.py`)
+- Learns pooled multi-horizon representations across VM telemetry with `P10`, `P50`, and `P90` quantile heads (`PinballLoss`).
+- Produces **30 / 60 / 90-day P10–P50–P90 spend & utilization fan trajectories**, comparing **Baseline Unoptimized Run-Rate** against the **FinOps Optimized Trajectory** (subtracting accepted recommendation savings) and reporting validation MAE vs. seasonal-naive baseline MAE.
 
-```bash
-docker build -t cloud-resource-advisor .
-docker run --rm -p 8000:8000 \
-  -v "$PWD/datasets/raw:/app/datasets/raw:ro" \
-  -v cloud-resource-advisor-models:/app/models \
-  cloud-resource-advisor
-```
+### 2. SRE Telemetry Audit & Peak-Safety Proof (`POST /ai/explain-resource`)
+- Evaluates `cpu_avg`, `cpu_p95`, `cpu_p99`, `mem_p95`, and `net_mbps_p95` to generate:
+  - **Mathematical Peak Headroom Proof:** Exact projected `p95`/`p99` utilization under candidate smaller plans.
+  - **Peak-Safety Trap Detection:** Blocks downsizing when bursty peaks (`p99 >= 85%` or `p95 > 75%`) threaten SLA latency, even if 30-day average CPU is `<15%`.
+  - **Ordinal Capacity Risk Score (`JevAssessment`):** 4-tier ordinal risk probability distribution (`0: Minimal` → `3: Critical`) alongside a 3-step Utho CLI rollback runbook and per-resource Terraform HCL snippet.
 
-## Dataset contracts
+### 3. Natural-Language What-If Scenario Parser (`POST /ai/parse-what-if`, `POST /api/v1/scenarios/simulate`)
+- Translates plain-English prompts (e.g., *"Hibernate all dev and staging VMs on nights and weekends with a 20% headroom buffer and clean up orphans older than 7 days"*) into structured simulation parameters (`dev_off_hours_enabled`, `dev_shutdown_hours_per_week`, `safety_headroom_buffer_pct`, `purge_orphaned_older_than_days`) and computes exact before/after INR cost and carbon deltas.
 
-Inventory is one row per resource and must contain:
+### 4. Retrieval-Grounded FinOps Copilot (`POST /api/v1/chat`, `POST /ai/chat`)
+- Answers operational questions strictly grounded in live inventory, `p95`/`p99` telemetry, active anomaly alerts, and Utho Cloud catalog rates, returning structured source citations (`resource_id`, metric values, and savings math). Operates deterministically even when `GOOGLE_API_KEY` is not set.
 
-```text
-resource_id,type,plan,region,environment,vcpu,ram_gb,disk_size_gb
-```
+---
 
-`team` is optional. `type` values currently supported for costing are `VM`,
-`block_volume`, and `public_ip`. VM rows need telemetry to receive model-based
-recommendations. Inventory resource IDs must be unique. To allow the API to
-identify orphaned storage/IP resources, include an `attached_to`,
-`attached_resource_id`, or `attachment_id` column. An empty value is treated as
-unattached; verify with your cloud provider before cleanup.
+## 🔌 Key API Endpoints
 
-Pricing is one row per plan and must contain:
+| Method & Path | Purpose |
+| :--- | :--- |
+| `GET /healthz` & `GET /api/v1/health` | Service health & active AI feature capabilities |
+| `POST /ai/explain-resource` | Deep SRE audit, headroom math proof, Jev ordinal risk, 24h quantiles & Utho Terraform HCL |
+| `POST /ai/forecast` | 30/60/90-day P10/P50/P90 cost & utilization forecast with baseline vs. optimized bands |
+| `POST /ai/parse-what-if` | Natural-language FinOps policy parser & impact explanation |
+| `POST /ai/anomalies` | Root-cause correlation & time-to-failure (TTF) math for memory leaks, cost spikes & disk trends |
+| `POST /ai/chat` & `POST /api/v1/chat` | Grounded FinOps Copilot chat with evidence citations |
+| `POST /api/v1/forecast/train` | Train pooled CPU & memory PyTorch TFT checkpoints |
+| `POST /api/v1/forecast/usage` | Multi-horizon `q10`/`q50`/`q90` VM utilization inference |
+| `POST /api/v1/optimization/actionable` | `p95`/`p99` peak-based rightsizing, idle VM detection, orphan cleanup & off-hours schedules |
+| `POST /api/v1/terraform` | Reviewable Terraform HCL configuration generator |
 
-```text
-plan,type,vcpu,ram_gb,rate,storage_rate
-```
+---
 
-`rate` is interpreted as USD per hour for VMs and public IPs. `storage_rate` is
-interpreted as USD per GB-month for storage. Provide the pricing units and
-currency that match your provider; the example calculations assume USD.
-
-Telemetry is one row per resource and timestamp and must contain:
-
-```text
-resource_id,timestamp,cpu_utilization_pct,memory_utilization_pct
-```
-
-Utilization values are percentages from 0 to 100. Timestamps must parse as
-datetimes. The forecast model aggregates input telemetry into configurable
-time buckets before training. The dashboard also reads these optional columns
-when supplied: `disk_utilization_pct` (0–100%), `disk_iops` (IOPS),
-`network_in_mbps` and `network_out_mbps` (Mbps). Metrics missing from the file
-are explicitly omitted rather than fabricated.
-
-## Train and forecast
-
-Training learns **one pooled TFT for CPU and one pooled TFT for memory**, using
-all inventoried VMs with matching telemetry. Training and inference are
-separate: checkpoints are saved under `MODEL_DIR`, and later forecast requests
-load them without retraining.
-
-1. Call `POST /api/v1/forecast/train`, for example:
-
-   ```json
-   {
-     "aggregation_hours": 4,
-     "prediction_hours": 24,
-     "epochs": 5,
-     "batch_size": 64
-   }
-   ```
-
-2. Call `POST /api/v1/forecast/usage` with `{"hours": 24}`. The requested
-   prediction horizon must match the horizon used to train the current model.
-   The result contains q10, q50, and q90 CPU/memory forecasts per VM and
-   timestamp.
-
-Training uses a time-ordered validation split and writes model checkpoints plus
-a small manifest to the configured model directory. It does not write plot
-files or training logs.
-
-## API features
-
-| Endpoint | Purpose |
-| --- | --- |
-| `GET /api/v1/resources` | Read the configured inventory |
-| `POST /api/v1/chat` | Grounded chatbot for resource data, history, forecasts, cost, recommendations, alerts, and what-if scenarios |
-| `GET /api/v1/chat/{conversation_id}` | Restore a persisted chatbot conversation |
-| `GET /api/v1/catalog` | Read configured plan prices/capacities |
-| `POST /api/v1/forecast/train` | Train pooled CPU and memory TFT models |
-| `POST /api/v1/forecast/usage` | Forecast all VMs using saved models |
-| `POST /api/v1/optimization/recommendations` | Recommend maintain/downsize/upsize plans and show a demand-based safety margin |
-| `POST /api/v1/costs/forecast` | Estimate current and recommended costs over 30, 60, or 90 days, by component and resource |
-| `POST /api/v1/scenarios/simulate` | Simulate a recurring shutdown schedule, with optional natural-language scenario text |
-| `POST /api/v1/terraform` | Return reviewable Terraform text for one VM plan |
-| `POST /api/v1/descriptions` | Generate a factual summary with Google Gemini |
-| `GET /api/v1/dashboard/summary` | Dashboard totals and metric rollups, with filters |
-| `GET /api/v1/dashboard/resources` | Filterable per-resource utilization and cost estimates |
-| `GET /api/v1/resources/{resource_id}/history` | Drill down into a resource's downsampled history |
-| `POST /api/v1/optimization/actionable` | Peak-based resize, idle-resource, orphan, and schedule suggestions |
-| `POST /api/v1/optimization/jev-risk` | Optional Jev risk assessment for one resource |
-| `GET /api/v1/alerts` | Capacity, spike, trend, budget, and supplied cost-change alerts |
-
-### Chatbot and database
-
-`POST /api/v1/chat` accepts `{"message":"...","conversation_id":null}`. It
-returns an answer, retrieved supporting data, and a conversation ID. Send that
-ID on the next request to continue the same conversation. Chat turns are stored
-in PostgreSQL. Each turn retrieves a current structured evidence bundle from
-inventory, pricing, recent telemetry, capacity recommendations, alerts, and
-trained forecasts when available. Gemini answers the user's question directly
-from this evidence and recent conversation; it does not route the question to a
-tool, generate SQL, or execute cloud changes. This is retrieval-grounded
-conversational answering over structured operational data, not vector/embedding
-search.
-
-Supported intents include resource list/filter, per-resource or fleet history,
-dashboard summaries, historical or forecast-based rightsizing, alerts, TFT
-forecasts, cost projections, sustainability estimates, optional Jev assessments,
-Terraform text generation when its required inputs are supplied, and
-natural-language shutdown scenarios. Chart history is automatically
-downsampled to at most 1,200 points per chatbot response. If a trained forecast
-checkpoint or telemetry source is unavailable, the retrieved context marks
-that section unavailable rather than fabricating a result. Without
-`GOOGLE_API_KEY`, the API still retrieves data but uses a short deterministic
-status response instead of a generated conversational answer. Set
-`DATABASE_URL` to persist conversation history. The web client should retain
-and send the returned conversation ID for follow-up questions.
-
-```bash
-curl -X POST 'http://127.0.0.1:8000/api/v1/chat' \
-  -H 'Content-Type: application/json' \
-  -d '{"message":"Show the last 7 days of CPU and memory for res-00001"}'
-
-# Reuse the returned conversation_id for follow-up questions.
-curl 'http://127.0.0.1:8000/api/v1/chat/<conversation_id>'
-```
-
-The Docker Compose database uses TimescaleDB (PostgreSQL) with a hypertable for
-telemetry, relational inventory and pricing tables, and conversation/message
-tables. `app/seed.py` imports the existing CSV and Parquet datasets. Dashboard
-percentiles and graph buckets are calculated in SQL with resource/time filters;
-TFT training reads telemetry aggregated into the requested time buckets. The
-seed operation is explicit so an 8.64-million-row telemetry import does not
-run every time the API container restarts.
-
-No pgvector extension is included. The chatbot's operational data is
-structured and time-sensitive, so it should query indexed database fields and
-existing calculations rather than use embeddings to retrieve metric values.
-If natural-language retrieval over runbooks or policy documents is added later,
-vector search can be considered for those documents. Caching dynamic cost,
-forecast, or utilization answers by query embedding could return stale values,
-so it is not used here.
-
-### Cost and capacity recommendations
-
-The original `POST /api/v1/optimization/recommendations` uses forecast q90
-utilization. The dashboard's `POST /api/v1/optimization/actionable` instead
-uses historical p95 or p99 CPU and memory (p99 by default), and a configurable
-headroom factor (1.3 by default). It calculates the capacity required at that
-peak percentile, then selects the least expensive catalog plan meeting both
-CPU and RAM requirements. It reports a specific plan, required capacity,
-estimated monthly savings, confidence in the data coverage, and a capacity-risk
-percentage. This is intended to avoid resizing based only on averages.
-
-The dashboard endpoints accept exact `region`, `environment`, and `team`
-filters. Resource summaries include latest, mean, p95, p99, and maximum values
-for every telemetry metric present. `network_in_mbps` and
-`network_out_mbps` are throughput, not a percent of network capacity; a
-network-capacity percentage requires a provider-specific link limit, which is
-not currently in the input schema. The resource history endpoint defaults to
-the latest seven days and hourly buckets; choose a 5-, 15-, 60-, 240-, or
-1440-minute interval. Up to 90 days can be requested.
-
-The actionable endpoint also flags non-production VMs that are idle across
-CPU, memory, disk IOPS, and network, and suggests shutdown windows when hourly
-CPU p95 stays under 5%. Volumes and IPs are only labelled orphaned when the
-inventory includes an explicit, empty `attached_to`, `attached_resource_id`,
-or `attachment_id` field. Without this metadata, the API returns an attachment
-review item rather than guessing. All actions are suggestions: the API does
-not stop, resize, or delete cloud resources.
-
-`risk_percentage` is an explainable **capacity-pressure index**: the maximum of
-the target plan's projected peak CPU/memory utilization and the existing disk
-utilization percentile. It is not the probability that a VM will fail.
-`confidence_level` is based on the amount and duration of telemetry available:
-at least seven days is high, at least one day is medium, and less than one day
-or missing data is low. These confidence labels describe evidence coverage,
-not a guarantee the recommendation is correct.
-
-Example dashboard calls:
-
-```bash
-# Summary across the last 30 days; filter by any combination of dimensions.
-curl 'http://127.0.0.1:8000/api/v1/dashboard/summary?hours=720&region=mumbai&environment=prod'
-
-# Per-resource utilization rows; add team=Payments to filter by owner.
-curl 'http://127.0.0.1:8000/api/v1/dashboard/resources?hours=720&team=Payments'
-
-# Drill into one VM; points are averaged into hourly buckets by default.
-curl 'http://127.0.0.1:8000/api/v1/resources/res-00001/history?hours=168&interval_minutes=60'
-
-# Use p99 peaks and 30% headroom for each resize recommendation.
-curl -X POST 'http://127.0.0.1:8000/api/v1/optimization/actionable' \
-  -H 'Content-Type: application/json' \
-  -d '{"hours":720,"peak_percentile":99,"headroom":1.3,"environment":"prod"}'
-
-# Compare current-rate monthly cost with budget and a caller-supplied last-month bill.
-curl 'http://127.0.0.1:8000/api/v1/alerts?hours=720&monthly_budget_usd=5000&previous_month_cost_usd=4200'
-```
-
-### Dashboard alerts
-
-`GET /api/v1/alerts` reports:
-
-- Capacity alerts when the selected-window p99 CPU, memory, or disk utilization
-  reaches 85% (high severity at 95%).
-- Usage spikes when the latest hourly p95 is at least 15 percentage points
-  above the prior hourly baseline and exceeds it by three standard deviations;
-  network spikes use a 10 Mbps minimum increase.
-- Capacity trends when daily p95 CPU or memory is rising by at least 0.5
-  percentage points per day and is already at 70% or higher.
-- Budget overruns when `monthly_budget_usd` is below the current-rate monthly
-  estimate.
-- Cost increases when `previous_month_cost_usd` is provided and the catalog-rate
-  estimate is at least 20% above it.
-
-The sample inventory has no billing-history dataset. Therefore the cost-change
-alert compares the catalog-rate projection against a caller-supplied previous
-month amount; it does not claim to be a provider's billed-cost history. Every
-alert includes a reason and supporting values.
-
-### Optional Jev risk assessment
-
-Set `TYPESAFE_API_KEY` in `.env` to enable the
-`POST /api/v1/optimization/jev-risk` endpoint. For one resource, it sends the
-recommendation and derived capacity metrics to TypeSafe's System One API and
-returns Jev's ordinal risk score, level probabilities, and model confidence.
-The service does not send the resource ID or raw telemetry. The
-`risk_score_percentage` is the Jev score normalized to 0–100, **not an outage
-probability**; Jev confidence is confidence in its classification, not the
-chance a recommendation is safe. Jev is advisory and never changes or executes
-the deterministic recommendation. Without an API key, the endpoint returns an
-explicit service-unavailable response.
-The model is configured with `TYPESAFE_MODEL` (default `jev-latest`). This
-integration calls TypeSafe's documented `POST https://api.typesafe.ai/v1/systemone`
-interface using a typed Score question; it is deliberately separate from the
-fast, deterministic dashboard and recommendation endpoints.
-
-The cost endpoint projects the selected plan and current rates across the
-requested 30/60/90-day period. It uses the horizon saved with the trained usage
-model to select recommended plans, so it works with any supported training
-horizon. It is a **constant-rate run-rate projection**, not an ML prediction of
-future prices or utilization for all those days. It includes VM compute, public
-IP, and storage charges available in the provided catalog. The full
-resource-level calculation and units are returned in JSON.
-
-Non-production VMs can also include a suggested low-load window when consecutive
-forecast intervals have q90 CPU below 5%. This is a suggestion only; apply a
-shutdown window through the scenario simulator to see its assumed savings.
-
-### What-if shutdown simulation
-
-Use structured fields for exact, repeatable inputs:
-
-```json
-{
-  "days": 30,
-  "environment": "dev",
-  "shutdown_start": "20:00:00",
-  "shutdown_end": "08:00:00",
-  "weekdays_only": false,
-  "use_recommended_plans": true
-}
-```
-
-Or use the supported simple text form:
-
-```json
-{
-  "days": 30,
-  "scenario_text": "What if we shut down all dev VMs from 8 PM to 8 AM?"
-}
-```
-
-The parser intentionally accepts a limited, explicit format (environment plus
-start/end time); it is not an unconstrained natural-language planner. Overnight
-windows are supported. The simulation assumes VM compute billing stops during
-the window; storage and public IP costs continue. Weekday-only schedules count
-five shutdown days per seven-day week. No actual cloud actions are taken.
-
-### Terraform generation
-
-`POST /api/v1/terraform` needs `resource_id`, `plan`, `ami_id`, and `subnet_id`.
-The generated HCL creates a **new** AWS EC2 instance using the catalog plan.
-Review AMI compatibility, networking, security groups, storage, IAM, import or
-migration strategy, and Terraform state before applying. The service never runs
-Terraform.
-
-### Google AI descriptions
-
-Set `GOOGLE_API_KEY` (and optionally `GOOGLE_MODEL`) in the process environment
-or `.env` to enable the descriptions endpoint. The key is not checked into the
-repository. The endpoint sends the requested title and facts to Google AI;
-avoid sending confidential inventory or customer data. Without a configured
-key, it returns an explicit service-unavailable response.
-
-### Sustainability estimate
-
-Optimization and scenario responses estimate energy and operational carbon
-changes from vCPU capacity, forecast CPU utilization, power-per-vCPU, data-center
-PUE, grid carbon intensity, and (for scenarios) selected VM shutdown hours.
-Defaults are configurable with `WATTS_PER_VCPU_IDLE`,
-`WATTS_PER_VCPU_FULL`, `DATA_CENTER_PUE`, and `GRID_CARBON_KG_PER_KWH`.
-The sustainability score is the estimated percentage reduction in operational
-carbon versus the current-plan estimate, clamped to 0–100. These are transparent
-planning estimates, not measured energy or a lifecycle assessment.
-
-## Configuration
-
-See `.env.example` for all paths and optional integration/energy settings.
-Relative dataset and model paths are resolved from this project directory.
-The API validates required columns and fails with an actionable response when
-configured files or model checkpoints are missing.
-
-## Tests
+## 🧪 Verification & Test Suite
 
 ```bash
 pytest
 ```
-
-Tests cover plan selection, per-component costs, scheduled shutdown arithmetic,
-scenario parsing, Terraform input safety, sustainability output, dashboard
-filtering and history, p99-based rightsizing, idle/orphan suggestions, alert
-reasons, Jev response validation, and API health.
+Covers `p99`-based rightsizing, scheduled shutdown arithmetic, NL scenario parsing, TFT forecast schema validation, Terraform HCL generation safety, sustainability calculations, Jev risk validation, and API health.
