@@ -579,6 +579,82 @@ def explain_resource_payload(payload: dict[str, Any]) -> dict[str, Any]:
 # ===========================================================================
 # 2. NATURAL-LANGUAGE "WHAT-IF" SCENARIO PARSER (/api/v1/ai/parse-scenario)
 # ===========================================================================
+def _parse_scenario_with_gemini(
+    query: str,
+    fleet_summary: dict[str, Any],
+    catalog: dict[str, Any],
+    timeout_sec: float = 3.2,
+) -> dict[str, Any] | None:
+    """Attempt fast structured Gemini scenario parsing with grounded fleet and pricing context."""
+    if not settings.google_api_key:
+        return None
+    url = (
+        "https://generativelanguage.googleapis.com/v1beta/models/"
+        f"{urllib.parse.quote(settings.google_model, safe='')}:generateContent"
+    )
+    prompt = (
+        "You are an expert FinOps autonomous simulation engine for Utho Cloud infrastructure.\n"
+        "Your task is to parse a natural-language What-If cost simulation scenario into exact, structured parameters.\n\n"
+        "Grounded Fleet Context:\n"
+        f"- Total resources: {fleet_summary.get('total_resources', 85)} "
+        f"({fleet_summary.get('vm_count', 65)} VMs, {fleet_summary.get('block_volume_count', 12)} unattached block volumes, "
+        f"{fleet_summary.get('public_ip_count', 8)} idle public IPs)\n"
+        f"- Baseline monthly spend: ₹{float(fleet_summary.get('monthly_baseline_inr', 683200)):,.0f} INR\n"
+        f"- Regions: {fleet_summary.get('regions', ['in-noida-1', 'in-bangalore-1', 'in-mumbai-1'])}\n"
+        f"- Environments: {fleet_summary.get('envs', ['prod', 'staging', 'dev'])}\n\n"
+        "Utho Cloud Pricing Catalog (sample plans & rates):\n"
+        f"{json.dumps(catalog, default=str)}\n\n"
+        f'User Scenario Query:\n"{query}"\n\n'
+        "Return a JSON object with EXACT keys:\n"
+        "{\n"
+        '  "dev_off_hours_enabled": boolean,\n'
+        '  "dev_shutdown_hours_per_week": integer (0 to 168. Default 118 if overnight+weekend dev shutdown, or calculate from specified hours e.g. 8 PM to 8 AM weekdays=60 + weekend=48 => 108 or 118. 0 if disabled),\n'
+        '  "staging_weekend_off_enabled": boolean,\n'
+        '  "staging_shutdown_hours_per_week": integer (typically 64 to 72 if weekend off enabled, 0 if disabled),\n'
+        '  "safety_headroom_buffer_pct": number (float between 10.0 and 60.0. Default 25.0, or extracted percentage like 15.0, 30.0, 40.0),\n'
+        '  "purge_orphaned_older_than_days": integer (between 3 and 90. Default 30, or extracted days like 7, 14, 15, 60),\n'
+        '  "detected_scope": {\n'
+        '    "environment": string ("dev" | "staging" | "prod" | "all"),\n'
+        '    "region": string ("in-bangalore-1" | "in-mumbai-1" | "in-noida-1" | "all"),\n'
+        '    "shutdown_start": string ("HH:MM" e.g. "20:00"),\n'
+        '    "shutdown_end": string ("HH:MM" e.g. "08:00")\n'
+        "  },\n"
+        '  "parsed_tags": list of string labels,\n'
+        '  "explanation": string (1-2 sentences summarizing the scenario parameters grounded in Utho fleet data)\n'
+        "}"
+    )
+    body = json.dumps(
+        {
+            "contents": [{"parts": [{"text": prompt}]}],
+            "generationConfig": {
+                "temperature": 0.1,
+                "maxOutputTokens": 600,
+                "responseMimeType": "application/json",
+            },
+        }
+    ).encode("utf-8")
+    req = urllib.request.Request(
+        url,
+        data=body,
+        headers={
+            "Content-Type": "application/json",
+            "x-goog-api-key": settings.google_api_key,
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout_sec) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+            raw_text = str(data["candidates"][0]["content"]["parts"][0]["text"]).strip()
+            if raw_text.startswith("```"):
+                raw_text = re.sub(r"^```(?:json)?\s*", "", raw_text)
+                raw_text = re.sub(r"\s*```$", "", raw_text)
+            parsed = json.loads(raw_text)
+            return parsed if isinstance(parsed, dict) else None
+    except Exception:
+        return None
+
+
 def parse_nl_scenario_payload(payload: dict[str, Any]) -> dict[str, Any]:
     """Parse natural-language What-If queries into exact simulator slider settings & INR impact."""
     key = _cache_key("parse_scenario", payload)
@@ -588,7 +664,84 @@ def parse_nl_scenario_payload(payload: dict[str, Any]) -> dict[str, Any]:
     query = str(payload.get("query") or payload.get("scenario_text") or "").strip()
     lower = query.lower()
 
-    # Default slider baseline
+    # Grounded fleet context from payload or authoritative 85-resource fleet
+    fleet_summary = payload.get("fleet_summary")
+    if not isinstance(fleet_summary, dict) or not fleet_summary:
+        fleet_summary = {
+            "total_resources": 85,
+            "vm_count": 65,
+            "block_volume_count": 12,
+            "public_ip_count": 8,
+            "monthly_baseline_inr": 683200.0,
+            "regions": ["in-noida-1", "in-bangalore-1", "in-mumbai-1"],
+            "envs": ["prod", "staging", "dev"],
+        }
+
+    catalog = payload.get("catalog")
+    if not isinstance(catalog, dict) or not catalog:
+        catalog = {
+            plan: {"monthly_inr": data["monthly_inr"], "vcpu": data["vcpu"], "ram_gb": data["ram_gb"]}
+            for plan, data in UTHO_CATALOG.items()
+        }
+        catalog["block_storage_gb_monthly"] = 8.0
+        catalog["public_ip_monthly"] = 350.0
+
+    # 1. Try grounded Gemini LLM parsing if configured
+    gemini_result = _parse_scenario_with_gemini(query, fleet_summary, catalog)
+    if gemini_result and isinstance(gemini_result, dict):
+        try:
+            dev_off = bool(gemini_result.get("dev_off_hours_enabled", True))
+            dev_hours = max(0, min(168, int(gemini_result.get("dev_shutdown_hours_per_week", 118))))
+            if not dev_off:
+                dev_hours = 0
+
+            staging_off = bool(gemini_result.get("staging_weekend_off_enabled", True))
+            staging_hours = max(
+                0, min(168, int(gemini_result.get("staging_shutdown_hours_per_week", 72 if staging_off else 0)))
+            )
+            if not staging_off:
+                staging_hours = 0
+
+            headroom = max(10.0, min(60.0, float(gemini_result.get("safety_headroom_buffer_pct", 25.0))))
+            purge_days = max(3, min(90, int(gemini_result.get("purge_orphaned_older_than_days", 30))))
+
+            scope = gemini_result.get("detected_scope") or {}
+            tags = gemini_result.get("parsed_tags") or [
+                f"Dev Off-Hours: {dev_hours}h/wk",
+                f"Peak Headroom: +{int(headroom)}%",
+                f"Orphan Purge: >{purge_days}d",
+            ]
+            explanation = str(
+                gemini_result.get("explanation")
+                or f"Grounded Gemini scenario parsed for Utho fleet baseline ₹{float(fleet_summary.get('monthly_baseline_inr', 683200)):,.0f}."
+            )
+
+            result = {
+                "query": query,
+                "provider": f"Gemini ({settings.google_model})",
+                "parsed_params": {
+                    "dev_off_hours_enabled": dev_off,
+                    "dev_shutdown_hours_per_week": dev_hours,
+                    "staging_weekend_off_enabled": staging_off,
+                    "staging_shutdown_hours_per_week": staging_hours,
+                    "safety_headroom_buffer_pct": headroom,
+                    "purge_orphaned_older_than_days": purge_days,
+                },
+                "detected_scope": {
+                    "environment": str(scope.get("environment") or "dev"),
+                    "region": str(scope.get("region") or "all"),
+                    "shutdown_start": str(scope.get("shutdown_start") or "20:00"),
+                    "shutdown_end": str(scope.get("shutdown_end") or "08:00"),
+                },
+                "parsed_tags": tags,
+                "explanation": explanation,
+            }
+            _AI_CACHE[key] = result
+            return result
+        except Exception:
+            pass  # Fall through to robust deterministic parser
+
+    # 2. Robust deterministic regex/pattern matching fallback
     dev_off_hours_enabled = True
     dev_shutdown_hours_per_week = 118
     staging_weekend_off_enabled = True
@@ -601,7 +754,7 @@ def parse_nl_scenario_payload(payload: dict[str, Any]) -> dict[str, Any]:
     shutdown_end_str = "08:00"
     parsed_tags: list[str] = []
 
-    # 1. Try the teammate's deterministic regex parser (app/services/scenarios.py) first
+    # 2a. Clock time range parsing (e.g. "8 PM to 8 AM")
     try:
         strict_parsed = parse_scenario_text(query)
         detected_env = strict_parsed["environment"]
@@ -611,14 +764,13 @@ def parse_nl_scenario_payload(payload: dict[str, Any]) -> dict[str, Any]:
         shutdown_end_str = et.strftime("%H:%M")
         daily_hrs = ((et.hour * 60 + et.minute) - (st.hour * 60 + st.minute)) % (24 * 60) / 60.0
         if daily_hrs > 0:
-            # 5 weekday nights + 48h weekend if weekend not excluded
-            if "weekday" in lower:
+            if "weekday" in lower and "weekend" not in lower:
                 dev_shutdown_hours_per_week = int(round(daily_hrs * 5))
             else:
                 dev_shutdown_hours_per_week = min(168, int(round(daily_hrs * 5 + 48)))
         parsed_tags.append(f"Window: {shutdown_start_str}→{shutdown_end_str} ({daily_hrs:.0f}h/day)")
     except ValueError:
-        # Extended time range or hours/week detection
+        # Check explicit hours per week
         hrs_match = re.search(r"(\d{1,3})\s*(?:hrs?|hours?)(?:\s*/\s*wk|\s*per\s*week)?", lower)
         if hrs_match:
             val = int(hrs_match.group(1))
@@ -627,6 +779,7 @@ def parse_nl_scenario_payload(payload: dict[str, Any]) -> dict[str, Any]:
                 dev_off_hours_enabled = val > 0
                 parsed_tags.append(f"Dev Shutdown: {val}h/wk")
 
+    # 2b. Dev off-hours toggle / disable check
     if any(p in lower for p in ("24/7", "no shutdown", "disable dev", "keep dev running", "0 hrs")):
         dev_off_hours_enabled = False
         dev_shutdown_hours_per_week = 0
@@ -635,9 +788,10 @@ def parse_nl_scenario_payload(payload: dict[str, Any]) -> dict[str, Any]:
         dev_off_hours_enabled = True
         if dev_shutdown_hours_per_week == 0:
             dev_shutdown_hours_per_week = 118
-        parsed_tags.append(f"Dev Off-Hours: {dev_shutdown_hours_per_week}h/wk")
+        if not any("Dev Shutdown" in t or "Window" in t for t in parsed_tags):
+            parsed_tags.append(f"Dev Off-Hours: {dev_shutdown_hours_per_week}h/wk")
 
-    # 2. Region detection
+    # 2c. Region detection
     if "bangalore" in lower or "in-bangalore-1" in lower:
         detected_region = "in-bangalore-1"
         parsed_tags.append("Region: in-bangalore-1")
@@ -648,24 +802,27 @@ def parse_nl_scenario_payload(payload: dict[str, Any]) -> dict[str, Any]:
         detected_region = "in-noida-1"
         parsed_tags.append("Region: in-noida-1")
 
-    # 3. Environment & Staging weekend detection
+    # 2d. Staging weekend off detection
     if "no weekend" in lower or "keep staging" in lower or "disable staging" in lower:
         staging_weekend_off_enabled = False
         parsed_tags.append("Staging Weekend Halt: Off")
     elif "staging" in lower or "weekend" in lower:
         staging_weekend_off_enabled = True
-        parsed_tags.append("Staging Weekend Halt: On (64h/wk)")
+        parsed_tags.append("Staging Weekend Halt: On (72h/wk)")
 
-    # 4. Peak-Safety Headroom Buffer % detection
-    headroom_match = re.search(
-        r"(\d{1,2})(?:\.\d+)?\s*%\s*(?:peak\s*)?(?:headroom|buffer|safety|margin)", lower
-    ) or re.search(r"(?:headroom|buffer|safety|margin)\s*(?:of|to|at)?\s*(\d{1,2})(?:\.\d+)?\s*%", lower)
+    # 2e. Peak-Safety Headroom Buffer % detection
+    headroom_match = (
+        re.search(r"(\d{1,2})(?:\.\d+)?\s*%\s*(?:peak\s*)?(?:headroom|buffer|safety|margin)", lower)
+        or re.search(r"(?:headroom|buffer|safety|margin)\s*(?:of|to|at|is)?\s*(\d{1,2})(?:\.\d+)?\s*%", lower)
+        or re.search(r"(\d{1,2})(?:\.\d+)?\s*(?:percent)\s*(?:peak\s*)?(?:headroom|buffer|safety|margin)", lower)
+        or re.search(r"(\d{1,2})\s*%\s*headroom", lower)
+    )
     if headroom_match:
-        pct = float(headroom_match.group(1))
-        # Clamp to slider valid steps (15..50, step 5)
-        clamped = max(15, min(50, int(round(pct / 5.0) * 5)))
-        safety_headroom_buffer_pct = float(clamped)
-        parsed_tags.append(f"Peak Headroom: +{clamped}%")
+        pct_str = headroom_match.group(1) or (headroom_match.group(2) if headroom_match.lastindex and headroom_match.lastindex >= 2 else None)
+        pct = float(pct_str or 25.0)
+        clamped = max(10.0, min(60.0, float(round(pct))))
+        safety_headroom_buffer_pct = clamped
+        parsed_tags.append(f"Peak Headroom: +{int(clamped)}%")
     elif "aggressive" in lower or "maximum savings" in lower or "max savings" in lower:
         safety_headroom_buffer_pct = 15.0
         purge_orphaned_older_than_days = 15
@@ -675,13 +832,16 @@ def parse_nl_scenario_payload(payload: dict[str, Any]) -> dict[str, Any]:
         safety_headroom_buffer_pct = 40.0
         parsed_tags.append("Profile: Ultra-Conservative (+40% Headroom)")
 
-    # 5. Orphan purge days threshold detection
-    orphan_match = re.search(r"(?:orphan\w*|volumes?|disks?|ips?).*?(\d{1,2})\s*days?", lower) or re.search(
-        r"older\s+than\s+(\d{1,2})\s*days?", lower
+    # 2f. Orphan purge days threshold detection
+    orphan_match = (
+        re.search(r"(?:orphan\w*|volumes?|disks?|ips?).*?(\d{1,2})\s*days?", lower)
+        or re.search(r"older\s+than\s+(\d{1,2})\s*days?", lower)
+        or re.search(r"purge.*?(\d{1,2})\s*days?", lower)
+        or re.search(r"clean.*?(\d{1,2})\s*days?", lower)
     )
     if orphan_match:
         days_val = int(orphan_match.group(1))
-        clamped_days = max(15, min(90, int(round(days_val / 15.0) * 15)))
+        clamped_days = max(3, min(60, days_val))
         purge_orphaned_older_than_days = clamped_days
         parsed_tags.append(f"Orphan Purge: >{clamped_days}d")
 
@@ -706,7 +866,8 @@ def parse_nl_scenario_payload(payload: dict[str, Any]) -> dict[str, Any]:
         f"Dev shutdown {dev_shutdown_hours_per_week}h/wk ({shutdown_start_str}–{shutdown_end_str}), "
         f"Staging weekend halt {'ENABLED' if staging_weekend_off_enabled else 'DISABLED'}, "
         f"Peak-Safety headroom buffer +{int(safety_headroom_buffer_pct)}% above p95, "
-        f"and orphan purge threshold >{purge_orphaned_older_than_days} days."
+        f"and orphan purge threshold >{purge_orphaned_older_than_days} days. "
+        f"Targeting Utho fleet baseline of ₹{float(fleet_summary.get('monthly_baseline_inr', 683200)):,.0f} across {fleet_summary.get('total_resources', 85)} resources."
     )
 
     result = {
