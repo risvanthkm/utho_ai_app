@@ -143,6 +143,8 @@ def forecast_endpoint(
 @router.post("/ai/chat")
 def chat_with_resource_advisor(request: ChatRequest) -> dict[str, Any]:
     try:
+        if getattr(request, "context", None):
+            return chat(settings, request.message, request.conversation_id, request.context)
         return chat(settings, request.message, request.conversation_id)
     except (FileNotFoundError, ValueError, RuntimeError, KeyError) as exc:
         raise _http_error(exc) from exc

@@ -45,7 +45,7 @@ services:
       MODEL_DIR: /app/models/tft
       AWS_REGION: ${AWS_REGION:-in-mumbai-1}
       GOOGLE_API_KEY: ${GOOGLE_API_KEY:-}
-      GOOGLE_MODEL: ${GOOGLE_MODEL:-gemini-2.5-flash}
+      GOOGLE_MODEL: ${GOOGLE_MODEL:-gemini-3.8-flash}
       TYPESAFE_API_KEY: ${TYPESAFE_API_KEY:-}
       TYPESAFE_MODEL: ${TYPESAFE_MODEL:-jev-latest}
       WATTS_PER_VCPU_IDLE: ${WATTS_PER_VCPU_IDLE:-5}

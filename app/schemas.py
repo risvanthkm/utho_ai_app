@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import time
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -76,7 +76,8 @@ class DescriptionRequest(APIModel):
 
 class ChatRequest(APIModel):
     message: str = Field(min_length=1, max_length=4000)
-    conversation_id: str | None = Field(default=None, max_length=36)
+    conversation_id: str | None = Field(default=None, max_length=128)
+    context: dict[str, Any] | None = Field(default=None)
 
 
 class SustainabilitySummary(BaseModel):
