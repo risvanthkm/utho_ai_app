@@ -98,6 +98,7 @@ def root_health() -> dict[str, Any]:
         "database_connected": db_connected,
         "db_connected": db_connected,
         "llm_configured": bool(api_key),
+        "google_model": settings.google_model,
         "forecast_model_loaded": model_loaded,
         "rag_index_size": rag_size,
         "features": all_features,

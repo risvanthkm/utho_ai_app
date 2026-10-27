@@ -495,14 +495,36 @@ def parse_scenario_endpoint(payload: dict[str, Any] = Body(default_factory=dict)
             "region": data.get("target_region"),
             "environment": data.get("target_environment"),
         }
+        parsed_params = {
+            "dev_off_hours_enabled": bool(data.get("dev_off_hours_enabled")),
+            "dev_shutdown_hours_per_week": int(data.get("dev_shutdown_hours_per_week") or 0),
+            "staging_weekend_off_enabled": bool(data.get("staging_weekend_off_enabled")),
+            "staging_shutdown_hours_per_week": int(data.get("staging_shutdown_hours_per_week") or 0),
+            "safety_headroom_buffer_pct": float(data.get("safety_headroom_buffer_pct") or 25.0),
+            "purge_orphaned_older_than_days": int(data.get("purge_orphaned_older_than_days") or (14 if data.get("purge_orphaned_disks") else 90)),
+            "target_region": data.get("target_region"),
+            "target_environment": data.get("target_environment"),
+        }
         return {
             "status": "ok",
+            "query": query,
+            "provider": data.get("provider", "Gemini LLM"),
+            "explanation": data.get("explanation", ""),
+            "parsed_tags": data.get("parsed_tags", []),
             "parsed": data,
-            "parsed_params": data,
+            "parsed_params": parsed_params,
             "detected_scope": detected_scope,
         }
     except Exception as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
+@router.get("/ai/llm-health")
+@ai_router.get("/ai/llm-health")
+@router.get("/health/llm")
+def llm_health_endpoint() -> dict[str, Any]:
+    from app.services.rag_service import test_gemini_connection
+    return test_gemini_connection()
 
 
 @router.post("/ai/correlate-alerts")

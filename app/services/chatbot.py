@@ -77,15 +77,27 @@ def _fallback_chat_answer(context: dict[str, Any], gemini_configured: bool, mess
     return synthesize_from_full_context(message, context)
 
 
+def is_casual_greeting(message: str) -> bool:
+    import re
+    clean = re.sub(r"[^\w\s]", "", message.lower()).strip()
+    words = clean.split()
+    greetings = {"hi", "hello", "hey", "hola", "yo", "howdy", "sup", "greetings", "good morning", "good afternoon", "good evening"}
+    if clean in greetings:
+        return True
+    if len(words) <= 2 and any(w in greetings for w in words):
+        return True
+    return False
+
+
 def chat(
     settings: Settings,
     message: str,
     conversation_id: str | None = None,
     extra_context: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Answer user chat from the full FinSort context (all VMs, storage, IPs, approved/pending recs, forecasts & savings) using gemini-3.8-flash."""
+    """Answer user chat from the full FinSort context (all VMs, storage, IPs, approved/pending recs, forecasts & savings) using Gemini LLM."""
     cid = conversation_id or "default"
-    model_name = settings.google_model or "gemini-3.8-flash"
+    model_name = settings.google_model or "gemini-2.5-flash"
 
     ctx = _retrieve_chat_context(settings)
     if extra_context and isinstance(extra_context, dict):
@@ -99,9 +111,17 @@ def chat(
     is_full_fleet_ctx = "resources" in ctx or "recommendations" in ctx
     synth_ans, telemetry_card = synthesize_from_full_context_with_telemetry(message, ctx) if is_full_fleet_ctx else ("", ctx)
     response_data = telemetry_card if is_full_fleet_ctx else ctx
+    is_greeting = is_casual_greeting(message)
 
     if not settings.google_api_key:
-        answer = synth_ans if is_full_fleet_ctx else _fallback_chat_answer(ctx, gemini_configured=False, message=message)
+        if is_greeting:
+            answer = (
+                "Hello! I am FinSort Copilot, your Utho Cloud FinOps and infrastructure assistant. "
+                "How can I assist you today? You can ask me to run What-If cost simulations, audit VMs, "
+                "review 30/60/90-day forecasts, or inspect rightsizing recommendations."
+            )
+        else:
+            answer = synth_ans if is_full_fleet_ctx else _fallback_chat_answer(ctx, gemini_configured=False, message=message)
         if cid not in _IN_MEMORY_CONVERSATIONS:
             _IN_MEMORY_CONVERSATIONS[cid] = []
         _IN_MEMORY_CONVERSATIONS[cid].append({"role": "user", "content": message})
@@ -111,7 +131,7 @@ def chat(
             "answer": answer,
             "reply": answer,
             "sources": raw_sources[:6],
-            "tool": "rag_gemini_3_8_flash",
+            "tool": "conversational_greeting" if is_greeting else "rag_gemini_3_8_flash",
             "data": response_data,
             "model": "retrieved-only" if "30_day_current_cost_estimate" in ctx else model_name,
         }
@@ -121,39 +141,59 @@ def chat(
         recent = history[-6:]
         history_block = " Recent conversation: " + json.dumps(recent)
 
-    system_instruction = (
-        "You are FinSort Copilot, the senior AI FinOps and SRE infrastructure intelligence platform assistant for Utho Cloud "
-        "(Mumbai in-mumbai-1, Noida in-noida-1, Bangalore in-bangalore-1).\n\n"
-        "CORE RULES:\n"
-        "1. DIRECT ANSWER MANDATE: Answer the user's specific question or request directly, thoroughly, and analytically. "
-        "DO NOT output an unsolicited general fleet overview or repeat dashboard summaries unless the user specifically asks for a fleet overview or summary.\n"
-        "2. WHAT-IF & SCENARIO SIMULATIONS: When asked about hibernating or scheduling off-hours for VMs (e.g. dev VMs in Bangalore from 8 PM to 8 AM, shutting down on weekends):\n"
-        "   - Calculate the exact hours offline: 8 PM to 8 AM weeknights = 12h/day * 5 days = 60h, plus 48h weekends = 108 to 118 hrs offline per week (~70.2% compute reduction).\n"
-        "   - Scope matching VMs in the fleet context (filtering by region and environment, e.g., dev VMs in in-bangalore-1).\n"
-        "   - Compute the rupee savings: Current Scope Spend * Reduction Ratio.\n"
-        "   - Confirm 0% production SLA risk because all 10 PROTECTED_PEAK_LOAD production VMs remain running.\n"
-        "   - Provide the specific Utho CLI schedule command: `utho vm schedule-power --env <env> --region <region> --stop '20:00' --start '08:00' --tz IST`.\n"
-        "3. COST SAVINGS ROADMAP: When asked how to save money or what actions to take, provide a prioritized 3-step execution plan citing exact numbers and top recommendations from the context.\n"
-        "4. SRE ANOMALIES & TTF: For alerts (ALT-001, ALT-002, ALT-003), explain the telemetry root cause, time-to-failure (TTF), and provide copy-ready mitigation commands.\n"
-        "5. TEAM & ATTRIBUTION: Break down spend and recoverable waste by engineering team.\n"
-        "6. ACCURACY: Cite exact resource IDs, regions, plans, and INR (₹) amounts from the context. Be conversational, intelligent, and technically authoritative."
-    )
+    if is_greeting:
+        system_instruction = (
+            "You are FinSort Copilot, the AI FinOps and cloud infrastructure intelligence assistant for Utho Cloud. "
+            "The user is saying hello or making casual conversation. Respond warmly, naturally, conversationally, and concisely "
+            "(1 to 2 sentences) like a friendly human engineer. Do NOT dump the 85-resource fleet overview, do NOT cite unsolicited metrics or tables. "
+            "Welcome them and briefly offer your help with fleet optimization, What-If cost simulations, or infrastructure audits."
+        )
+        full_prompt = (
+            f"USER GREETING: {message}\n\n"
+            f"Respond warmly and conversationally as FinSort Copilot.{history_block}"
+        )
+    else:
+        system_instruction = (
+            "You are FinSort Copilot, the senior AI FinOps and SRE infrastructure intelligence platform assistant for Utho Cloud "
+            "(Mumbai in-mumbai-1, Noida in-noida-1, Bangalore in-bangalore-1).\n\n"
+            "CORE RULES:\n"
+            "1. DIRECT ANSWER MANDATE: Answer the user's specific question or request directly, thoroughly, and analytically. "
+            "DO NOT output an unsolicited general fleet overview or repeat dashboard summaries unless the user specifically asks for a fleet overview or summary.\n"
+            "2. WHAT-IF & SCENARIO SIMULATIONS: When asked about hibernating or scheduling off-hours for VMs (e.g. dev VMs in Bangalore from 8 PM to 8 AM, shutting down on weekends):\n"
+            "   - Calculate the exact hours offline: 8 PM to 8 AM weeknights = 12h/day * 5 days = 60h, plus 48h weekends = 108 to 118 hrs offline per week (~70.2% compute reduction).\n"
+            "   - Scope matching VMs in the fleet context (filtering by region and environment, e.g., dev VMs in in-bangalore-1).\n"
+            "   - Compute the rupee savings: Current Scope Spend * Reduction Ratio.\n"
+            "   - Confirm 0% production SLA risk because all 10 PROTECTED_PEAK_LOAD production VMs remain running.\n"
+            "   - Provide the specific Utho CLI schedule command: `utho vm schedule-power --env <env> --region <region> --stop '20:00' --start '08:00' --tz IST`.\n"
+            "3. COST SAVINGS ROADMAP: When asked how to save money or what actions to take, provide a prioritized 3-step execution plan citing exact numbers and top recommendations from the context.\n"
+            "4. SRE ANOMALIES & TTF: For alerts (ALT-001, ALT-002, ALT-003), explain the telemetry root cause, time-to-failure (TTF), and provide copy-ready mitigation commands.\n"
+            "5. TEAM & ATTRIBUTION: Break down spend and recoverable waste by engineering team.\n"
+            "6. ACCURACY: Cite exact resource IDs, regions, plans, and INR (₹) amounts from the context. Be conversational, intelligent, and technically authoritative."
+        )
 
-    full_prompt = (
-        f"USER QUESTION: {message}\n\n"
-        "You are FinSort Copilot, a conversational FinOps and SRE assistant for Utho Cloud (Mumbai, Noida, Bangalore). "
-        "Answer the newest user question directly; do not classify it, select a tool, or ask another system "
-        "to route it. Use the complete fleet data (all VMs, block volumes, public IPs, approved/accepted vs pending "
-        "recommendations, INR savings, 30/60/90d TFT forecasts, and active alerts) in Context to give a specific, "
-        f"accurate answer citing resource IDs and INR (₹) figures.{history_block} "
-        f"Context: {json.dumps(ctx)}\n\n"
-        f"CRITICAL REMINDER: Address the user question '{message}' directly with specific telemetry, calculations, and commands. Do NOT dump an unsolicited fleet summary."
-    )
+        full_prompt = (
+            f"USER QUESTION: {message}\n\n"
+            "You are FinSort Copilot, a conversational FinOps and SRE assistant for Utho Cloud (Mumbai, Noida, Bangalore). "
+            "Answer the newest user question directly; do not classify it, select a tool, or ask another system "
+            "to route it. Use the complete fleet data (all VMs, block volumes, public IPs, approved/accepted vs pending "
+            "recommendations, INR savings, 30/60/90d TFT forecasts, and active alerts) in Context to give a specific, "
+            f"accurate answer citing resource IDs and INR (₹) figures.{history_block} "
+            f"Context: {json.dumps(ctx)}\n\n"
+            f"CRITICAL REMINDER: Address the user question '{message}' directly with specific telemetry, calculations, and commands. Do NOT dump an unsolicited fleet summary."
+        )
 
     try:
         answer = _gemini_request(settings, full_prompt, system_instruction=system_instruction)
-    except Exception:
-        answer = synth_ans if is_full_fleet_ctx else _fallback_chat_answer(ctx, gemini_configured=True, message=message)
+    except Exception as exc:
+        print(f"[FinSort Copilot] Gemini call failed, using fallback: {exc}")
+        if is_greeting:
+            answer = (
+                "Hello! I am FinSort Copilot, your Utho Cloud FinOps and infrastructure assistant. "
+                "How can I assist you today? You can ask me to run What-If cost simulations, audit VMs, "
+                "review 30/60/90-day forecasts, or inspect rightsizing recommendations."
+            )
+        else:
+            answer = synth_ans if is_full_fleet_ctx else _fallback_chat_answer(ctx, gemini_configured=True, message=message)
 
     if cid not in _IN_MEMORY_CONVERSATIONS:
         _IN_MEMORY_CONVERSATIONS[cid] = []
@@ -165,7 +205,7 @@ def chat(
         "answer": answer,
         "reply": answer,
         "sources": raw_sources[:6],
-        "tool": "structured_rag_retrieval",
+        "tool": "conversational_greeting" if is_greeting else "structured_rag_retrieval",
         "data": response_data,
         "model": model_name,
     }

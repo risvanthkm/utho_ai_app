@@ -12,7 +12,20 @@ from pydantic import BaseModel, Field
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 RAG_CACHE_PATH = PROJECT_ROOT / "data" / "rag_index.json"
-DEFAULT_GEMINI_MODEL = os.getenv("GOOGLE_MODEL", "gemini-3.8-flash")
+DEFAULT_GEMINI_MODEL = os.getenv("GOOGLE_MODEL", "gemini-2.5-flash")
+
+_LAST_WORKING_MODEL: str | None = None
+
+RELIABLE_GEMINI_MODELS = (
+    "gemini-2.5-flash",
+    "gemini-2.0-flash",
+    "gemini-1.5-flash",
+    "gemini-2.5-flash-lite",
+    "gemini-2.0-flash-lite",
+    "gemini-2.5-pro",
+    "gemini-1.5-pro",
+    "gemini-flash-latest",
+)
 
 _rag_chunks: list[dict[str, Any]] = []
 _rag_embeddings: np.ndarray | None = None
@@ -25,10 +38,13 @@ class ScenarioStructuredOutput(BaseModel):
     dev_off_hours_enabled: bool = Field(default=False, description="Whether dev/staging off-hours schedule is enabled")
     dev_shutdown_hours_per_week: int = Field(default=0, ge=0, le=168, description="Hours per week workloads are powered off")
     staging_weekend_off_enabled: bool = Field(default=False, description="Whether staging weekend shutdown is enabled")
-    safety_headroom_buffer_pct: int = Field(default=30, ge=10, le=50, description="Safety headroom buffer percentage")
+    staging_shutdown_hours_per_week: int = Field(default=0, ge=0, le=168, description="Hours per week staging workloads are powered off")
+    safety_headroom_buffer_pct: float = Field(default=25.0, ge=10.0, le=50.0, description="Safety headroom buffer percentage")
     purge_orphaned_disks: bool = Field(default=False, description="Whether to purge unattached block storage volumes")
+    purge_orphaned_older_than_days: int = Field(default=14, ge=0, le=90, description="Threshold age in days for purging unattached disks")
     release_unused_ips: bool = Field(default=False, description="Whether to release unassociated public IPs")
-    explanation: str = Field(description="Engineering rationale for the parameter choices")
+    explanation: str = Field(default="Automated What-If scenario", description="Engineering rationale for the parameter choices")
+    parsed_tags: list[str] = Field(default_factory=list, description="Categorical tags for the scenario")
 
 
 def _get_gemini_client(api_key: str | None = None):
@@ -44,16 +60,23 @@ def _get_gemini_client(api_key: str | None = None):
 
 
 def call_gemini_text(prompt: str, system_instruction: str | None = None, model: str | None = None, api_key: str | None = None) -> str:
-    """Call Gemini 3.8 Flash (with automatic model fallback if tier-restricted)."""
+    """Call Gemini (with automatic fallback to official production Gemini models)."""
+    global _LAST_WORKING_MODEL
     client = _get_gemini_client(api_key=api_key)
     if client is None:
         raise RuntimeError("GOOGLE_API_KEY is not configured.")
 
     preferred_model = model or os.getenv("GOOGLE_MODEL", DEFAULT_GEMINI_MODEL)
-    candidate_models = [preferred_model]
-    for fallback_m in ("gemini-3.8-flash", "gemini-2.5-flash", "gemini-flash-latest"):
-        if fallback_m not in candidate_models:
-            candidate_models.append(fallback_m)
+    candidate_models: list[str] = []
+    if _LAST_WORKING_MODEL and _LAST_WORKING_MODEL not in candidate_models:
+        candidate_models.append(_LAST_WORKING_MODEL)
+    if preferred_model and preferred_model not in candidate_models and preferred_model != "gemini-3.8-flash":
+        candidate_models.append(preferred_model)
+    for m in RELIABLE_GEMINI_MODELS:
+        if m not in candidate_models:
+            candidate_models.append(m)
+    if "gemini-3.8-flash" not in candidate_models:
+        candidate_models.append("gemini-3.8-flash")
 
     last_exc: Exception | None = None
     for m in candidate_models:
@@ -61,11 +84,72 @@ def call_gemini_text(prompt: str, system_instruction: str | None = None, model: 
             cfg = {"system_instruction": system_instruction} if system_instruction else None
             resp = client.models.generate_content(model=m, contents=prompt, config=cfg)
             if resp and getattr(resp, "text", None):
+                _LAST_WORKING_MODEL = m
                 return resp.text.strip()
         except Exception as exc:
             last_exc = exc
 
     raise RuntimeError(f"Gemini generation failed: {last_exc}") from last_exc
+
+
+def test_gemini_connection(api_key: str | None = None) -> dict[str, Any]:
+    """Test live connectivity and latency to Google Gemini models."""
+    import time
+    key = (api_key or os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY") or "").strip()
+    if not key:
+        return {
+            "status": "degraded",
+            "api_key_configured": False,
+            "masked_key": None,
+            "live_call_success": False,
+            "error": "GOOGLE_API_KEY is not set in environment",
+            "active_model": None,
+        }
+
+    masked_key = f"{key[:6]}...{key[-4:]}" if len(key) >= 10 else "***"
+    client = _get_gemini_client(api_key=key)
+    if client is None:
+        return {
+            "status": "degraded",
+            "api_key_configured": True,
+            "masked_key": masked_key,
+            "live_call_success": False,
+            "error": "Failed to instantiate google.genai.Client",
+            "active_model": None,
+        }
+
+    start = time.perf_counter()
+    errors: dict[str, str] = {}
+    for m in RELIABLE_GEMINI_MODELS:
+        try:
+            resp = client.models.generate_content(
+                model=m,
+                contents="Reply with 'FinSort LLM online' in exactly 3 words.",
+            )
+            elapsed_ms = round((time.perf_counter() - start) * 1000, 2)
+            if resp and getattr(resp, "text", None):
+                return {
+                    "status": "ok",
+                    "api_key_configured": True,
+                    "masked_key": masked_key,
+                    "live_call_success": True,
+                    "active_model": m,
+                    "sample_response": resp.text.strip(),
+                    "latency_ms": elapsed_ms,
+                    "error": None,
+                }
+        except Exception as exc:
+            errors[m] = str(exc)
+
+    return {
+        "status": "degraded",
+        "api_key_configured": True,
+        "masked_key": masked_key,
+        "live_call_success": False,
+        "active_model": None,
+        "error": f"All candidate models failed: {errors}",
+        "candidate_errors": errors,
+    }
 
 
 def build_knowledge_chunks() -> list[dict[str, Any]]:
@@ -421,15 +505,9 @@ def synthesize_from_full_context_with_telemetry(message: str, ctx: dict[str, Any
     greetings = {"hi", "hello", "hey", "hola", "yo", "good morning", "good afternoon", "good evening", "howdy"}
     if q in greetings or (len(clean_words) <= 2 and clean_words & greetings):
         ans = (
-            "Hello! I am FinSort Copilot, your AI cloud infrastructure and FinOps intelligence assistant for Utho Cloud.\n"
-            f"I actively monitor 85 enterprise resources across Mumbai, Noida, and Bangalore—tracking ₹{cur_spend:,.0f}/mo in compute/storage run-rate, "
-            f"₹{acc_sav:,.0f}/mo in approved savings, 3 active SRE anomaly alerts, and 90-day TFT forecasts.\n\n"
-            "Here are a few questions you can ask me:\n"
-            "• 'What if we hibernate dev VMs in Bangalore from 8 PM to 8 AM?'\n"
-            "• 'Why did our SaaS cloud bill grow 40% in six months?'\n"
-            "• 'Audit ALT-001 memory leak and show remediation CLI.'\n"
-            "• 'Show top peak-safe rightsizing candidates with p99 < 85%.'\n"
-            "• 'Which team is spending the most money?'"
+            "Hello! I am FinSort Copilot, your Utho Cloud FinOps and infrastructure assistant. "
+            "How can I assist you today? You can ask me to run What-If cost simulations, audit VMs, "
+            "review 30/60/90-day forecasts, or inspect rightsizing recommendations."
         )
         return ans, {
             "copilot_status": "online",
@@ -1093,14 +1171,32 @@ def answer_chat(
 
 
 def parse_scenario_structured(query: str) -> dict[str, Any]:
-    """Convert natural-language scenario into validated parameters via Gemini 3.8 Flash structured output."""
+    """Convert natural-language scenario into validated parameters via Gemini LLM structured output or rule fallback."""
     client = _get_gemini_client()
+    provider_used = "Deterministic Heuristic Engine"
+
     if client is not None:
         system_prompt = (
-            "You are a FinOps systems engineer for FinSort on Utho Cloud. Convert the user's natural language scenario query "
-            "into strict structured configuration parameters adhering to the schema. The Go engine will calculate all costs."
+            "You are a senior FinOps systems architect for FinSort on Utho Cloud (Mumbai in-mumbai-1, Noida in-noida-1, Bangalore in-bangalore-1). "
+            "Convert the user's natural language What-If scenario query into strict structured configuration parameters adhering to the schema. "
+            "The Go simulation engine will calculate all exact costs and carbon savings.\n"
+            "Rules:\n"
+            "- If dev or QA workloads should be turned off or hibernated outside work hours, set dev_off_hours_enabled=true and compute dev_shutdown_hours_per_week (108 to 118 for nights+weekends, 60 for weeknights only, 48 for weekends only).\n"
+            "- If staging weekend halt is requested, set staging_weekend_off_enabled=true and staging_shutdown_hours_per_week (default 64 to 72).\n"
+            "- If a target region is mentioned (Bangalore -> in-bangalore-1, Noida -> in-noida-1, Mumbai -> in-mumbai-1), set target_region.\n"
+            "- If a target environment is mentioned (dev -> development, staging -> staging, prod -> production), set target_environment.\n"
+            "- If safety headroom buffer is mentioned (e.g. 20%, 30%), set safety_headroom_buffer_pct.\n"
+            "- If orphaned disks or unattached volumes should be cleaned up, set purge_orphaned_disks=true and purge_orphaned_older_than_days (default 14).\n"
+            "- If unattached public IPs should be released, set release_unused_ips=true.\n"
+            "- Provide an authoritative, professional engineering explanation of the policy changes.\n"
+            "- Include categorical parsed_tags (e.g. ['Off-Hours Hibernation', 'Bangalore Dev', 'Storage Cleanup'])."
         )
-        for m in (DEFAULT_GEMINI_MODEL, "gemini-3.8-flash", "gemini-2.5-flash"):
+        candidate_models = list(RELIABLE_GEMINI_MODELS)
+        if _LAST_WORKING_MODEL and _LAST_WORKING_MODEL in candidate_models:
+            candidate_models.remove(_LAST_WORKING_MODEL)
+            candidate_models.insert(0, _LAST_WORKING_MODEL)
+
+        for m in candidate_models:
             try:
                 response = client.models.generate_content(
                     model=m,
@@ -1111,25 +1207,74 @@ def parse_scenario_structured(query: str) -> dict[str, Any]:
                         "response_schema": ScenarioStructuredOutput,
                     },
                 )
-                return json.loads(response.text)
+                if response and getattr(response, "text", None):
+                    parsed_dict = json.loads(response.text)
+                    parsed_dict["provider"] = f"Gemini LLM ({m})"
+                    if "staging_shutdown_hours_per_week" not in parsed_dict or parsed_dict["staging_shutdown_hours_per_week"] == 0:
+                        if parsed_dict.get("staging_weekend_off_enabled"):
+                            parsed_dict["staging_shutdown_hours_per_week"] = 72
+                    if "purge_orphaned_older_than_days" not in parsed_dict or parsed_dict["purge_orphaned_older_than_days"] == 0:
+                        parsed_dict["purge_orphaned_older_than_days"] = 14 if parsed_dict.get("purge_orphaned_disks") else 90
+                    if not parsed_dict.get("parsed_tags"):
+                        tags = []
+                        if parsed_dict.get("dev_off_hours_enabled"):
+                            tags.append(f"Dev Off-Hours ({parsed_dict.get('dev_shutdown_hours_per_week', 108)}h/wk)")
+                        if parsed_dict.get("staging_weekend_off_enabled"):
+                            tags.append(f"Staging Weekend Off ({parsed_dict.get('staging_shutdown_hours_per_week', 72)}h/wk)")
+                        if parsed_dict.get("purge_orphaned_disks") or parsed_dict.get("release_unused_ips"):
+                            tags.append("Orphan Asset Purge")
+                        if parsed_dict.get("target_region"):
+                            tags.append(f"Region: {parsed_dict.get('target_region')}")
+                        parsed_dict["parsed_tags"] = tags
+                    return parsed_dict
             except Exception:
                 continue
 
+    # Deterministic fallback parser
     import re
     q_lower = query.lower()
     env = "development" if "dev" in q_lower else "staging" if "staging" in q_lower else "production" if "prod" in q_lower else None
     region = "in-bangalore-1" if "bangalore" in q_lower else "in-noida-1" if "noida" in q_lower else "in-mumbai-1" if "mumbai" in q_lower else None
     pct_match = re.search(r"(\d+(?:\.\d+)?)\s*%", q_lower)
     headroom_pct = float(pct_match.group(1)) if pct_match else 25.0
+    dev_off = any(k in q_lower for k in ("shut down", "off", "night", "hibernate", "schedule")) and (env != "production")
+    staging_off = ("weekend" in q_lower or "staging" in q_lower) and env != "production"
+    purge_disks = any(k in q_lower for k in ("disk", "storage", "orphan", "volume", "cleanup", "purge"))
+    release_ips = any(k in q_lower for k in ("ip", "floating ip", "orphan", "unused"))
+
+    tags = []
+    if dev_off:
+        tags.append("Dev Off-Hours (108h/wk)")
+    if staging_off:
+        tags.append("Staging Weekend Off (72h/wk)")
+    if purge_disks or release_ips:
+        tags.append("Orphan Asset Purge")
+    if region:
+        tags.append(f"Region: {region}")
+
+    explanation_parts = []
+    if dev_off:
+        explanation_parts.append("Powers off non-production developer VMs on weeknights and weekends (up to 70.2% compute reduction).")
+    if staging_off:
+        explanation_parts.append("Halts staging environments over 72-hour weekend idle windows.")
+    if purge_disks:
+        explanation_parts.append("Purges unattached Block SSD volumes older than 14 days.")
+    if not explanation_parts:
+        explanation_parts.append(f"Evaluates fleet with {headroom_pct:.0f}% safety headroom governor.")
+
     return {
         "scenario_label": query.strip()[:60],
         "target_environment": env,
         "target_region": region,
-        "dev_off_hours_enabled": "shut down" in q_lower or "off" in q_lower or "night" in q_lower or "hibernate" in q_lower,
-        "dev_shutdown_hours_per_week": 118 if ("weekend" in q_lower or "night" in q_lower) else 84 if ("8 pm" in q_lower or "8pm" in q_lower) else 60,
-        "staging_weekend_off_enabled": "weekend" in q_lower or "staging" in q_lower,
+        "dev_off_hours_enabled": dev_off,
+        "dev_shutdown_hours_per_week": 118 if ("weekend" in q_lower or "night" in q_lower) else 84 if ("8 pm" in q_lower or "8pm" in q_lower) else 60 if dev_off else 0,
+        "staging_weekend_off_enabled": staging_off,
+        "staging_shutdown_hours_per_week": 72 if staging_off else 0,
         "safety_headroom_buffer_pct": headroom_pct,
-        "purge_orphaned_disks": "disk" in q_lower or "storage" in q_lower or "orphan" in q_lower or "volume" in q_lower,
-        "release_unused_ips": "ip" in q_lower or "orphan" in q_lower,
-        "explanation": f"Grounded scenario parsed from natural query: {query.strip()}",
+        "purge_orphaned_disks": purge_disks,
+        "purge_orphaned_older_than_days": 14 if purge_disks else 90,
+        "release_unused_ips": release_ips,
+        "explanation": " ".join(explanation_parts),
+        "parsed_tags": tags,
+        "provider": provider_used,
     }

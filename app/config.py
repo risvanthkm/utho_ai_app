@@ -52,7 +52,7 @@ class Settings:
             model_dir=_path_setting("MODEL_DIR", PROJECT_ROOT / "models" / "tft"),
             default_region=os.getenv("AWS_REGION", "us-east-1"),
             google_api_key=os.getenv("GOOGLE_API_KEY"),
-            google_model=os.getenv("GOOGLE_MODEL", "gemini-3.8-flash"),
+            google_model=os.getenv("GOOGLE_MODEL", "gemini-2.5-flash"),
             typesafe_api_key=os.getenv("TYPESAFE_API_KEY"),
             typesafe_model=os.getenv("TYPESAFE_MODEL", "jev-latest"),
             database_url=os.getenv("DATABASE_URL") or None,

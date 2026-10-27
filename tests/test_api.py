@@ -102,3 +102,14 @@ def test_smartcloud_root_health_and_ai_endpoints():
     assert briefing.status_code == 200
     assert briefing.json()["role"] == "engineering"
     assert len(briefing.json()["bullet_points"]) == 3
+
+    llm_health = client.get("/api/v1/ai/llm-health")
+    assert llm_health.status_code == 200
+    assert "status" in llm_health.json()
+    assert "api_key_configured" in llm_health.json()
+
+    chat_hi = client.post("/api/v1/chat", json={"message": "hi"})
+    assert chat_hi.status_code == 200
+    assert "Hello" in chat_hi.json()["answer"]
+    assert "tracking ₹" not in chat_hi.json()["answer"]
+    assert chat_hi.json()["tool"] == "conversational_greeting"
