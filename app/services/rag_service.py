@@ -57,23 +57,6 @@ def call_gemini_text(prompt: str, system_instruction: str | None = None, model: 
 
     last_exc: Exception | None = None
     for m in candidate_models:
-        # 1. Try new Interactions API if available on the installed google-genai SDK
-        if hasattr(client, "interactions"):
-            try:
-                kwargs: dict[str, Any] = {"model": m, "input": prompt}
-                if system_instruction:
-                    kwargs["system_instruction"] = system_instruction
-                interaction = client.interactions.create(**kwargs)
-                text = getattr(interaction, "output_text", None)
-                if text:
-                    return str(text).strip()
-            except Exception as exc:
-                last_exc = exc
-                err_str = str(exc)
-                if "401" in err_str or "UNAUTHENTICATED" in err_str or "ACCESS_TOKEN_TYPE_UNSUPPORTED" in err_str:
-                    break
-
-        # 2. Standard generate_content API
         try:
             cfg = {"system_instruction": system_instruction} if system_instruction else None
             resp = client.models.generate_content(model=m, contents=prompt, config=cfg)
@@ -81,9 +64,6 @@ def call_gemini_text(prompt: str, system_instruction: str | None = None, model: 
                 return resp.text.strip()
         except Exception as exc:
             last_exc = exc
-            err_str = str(exc)
-            if "401" in err_str or "UNAUTHENTICATED" in err_str or "ACCESS_TOKEN_TYPE_UNSUPPORTED" in err_str:
-                break
 
     raise RuntimeError(f"Gemini generation failed: {last_exc}") from last_exc
 
