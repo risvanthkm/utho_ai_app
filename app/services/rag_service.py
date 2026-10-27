@@ -505,20 +505,10 @@ def synthesize_from_full_context_with_telemetry(message: str, ctx: dict[str, Any
     clean_words = set(re.findall(r"\b[a-z0-9_\-]+\b", q))
 
     # 0. Conversational & Identity Intents
-    greetings = {"hi", "hello", "hey", "hola", "yo", "good morning", "good afternoon", "good evening", "howdy"}
-    if q in greetings or (len(clean_words) <= 2 and clean_words & greetings):
-        ans = (
-            "Hello! I am FinSort Copilot, your Utho Cloud FinOps and infrastructure assistant. "
-            "How can I assist you today? You can ask me to run What-If cost simulations, audit VMs, "
-            "review 30/60/90-day forecasts, or inspect rightsizing recommendations."
-        )
-        return ans, {
-            "copilot_status": "online",
-            "monitored_resources": len(resources) or 85,
-            "current_monthly_spend_inr": cur_spend,
-            "approved_monthly_savings_inr": acc_sav,
-            "total_savings_potential_inr": tot_sav,
-        }
+    greetings = {"hi", "hello", "hey", "hola", "yo", "good morning", "good afternoon", "good evening", "howdy", "hi there", "hello there", "hey there", "whats up", "what's up"}
+    if q in greetings or (len(clean_words) <= 2 and clean_words & {"hi", "hello", "hey", "hola", "yo", "howdy", "sup"}):
+        ans = "Hello! I am FinSort Copilot. How can I help you today?"
+        return ans, {}
 
     if any(k in q for k in ("who are you", "what can you do", "help me", "your capabilities", "introduce yourself")):
         ans = (
@@ -1218,6 +1208,10 @@ def parse_scenario_structured(query: str) -> dict[str, Any]:
                             parsed_dict["staging_shutdown_hours_per_week"] = 72
                     if "purge_orphaned_older_than_days" not in parsed_dict or parsed_dict["purge_orphaned_older_than_days"] == 0:
                         parsed_dict["purge_orphaned_older_than_days"] = 14 if parsed_dict.get("purge_orphaned_disks") else 90
+                    if parsed_dict.get("dev_shutdown_hours_per_week", 0) > 0:
+                        parsed_dict["dev_off_hours_enabled"] = True
+                    if parsed_dict.get("staging_shutdown_hours_per_week", 0) > 0:
+                        parsed_dict["staging_weekend_off_enabled"] = True
                     if not parsed_dict.get("parsed_tags"):
                         tags = []
                         if parsed_dict.get("dev_off_hours_enabled"):

@@ -81,11 +81,22 @@ def is_casual_greeting(message: str) -> bool:
     import re
     clean = re.sub(r"[^\w\s]", "", message.lower()).strip()
     words = clean.split()
-    greetings = {"hi", "hello", "hey", "hola", "yo", "howdy", "sup", "greetings", "good morning", "good afternoon", "good evening"}
+    if not words:
+        return False
+    greetings = {
+        "hi", "hello", "hey", "hola", "yo", "howdy", "sup", "greetings",
+        "good morning", "good afternoon", "good evening", "good day",
+        "hi there", "hello there", "hey there", "whats up", "what's up",
+    }
     if clean in greetings:
         return True
-    if len(words) <= 2 and any(w in greetings for w in words):
-        return True
+    if len(words) <= 3 and any(w in {"hi", "hello", "hey", "hola", "yo", "howdy", "sup"} for w in words):
+        technical_keywords = {
+            "vm", "vms", "cost", "spend", "savings", "alert", "alt", "forecast",
+            "rightsize", "what-if", "what if", "audit", "disk", "ip", "volume", "status",
+        }
+        if not any(k in clean for k in technical_keywords):
+            return True
     return False
 
 
@@ -110,16 +121,12 @@ def chat(
     raw_sources = ctx.get("sources") if isinstance(ctx.get("sources"), list) else [{"id": r["id"], "title": r["title"]} for r in retrieve(message, top_k=6)]
     is_full_fleet_ctx = "resources" in ctx or "recommendations" in ctx
     synth_ans, telemetry_card = synthesize_from_full_context_with_telemetry(message, ctx) if is_full_fleet_ctx else ("", ctx)
-    response_data = telemetry_card if is_full_fleet_ctx else ctx
     is_greeting = is_casual_greeting(message)
+    response_data = {} if is_greeting else (telemetry_card if is_full_fleet_ctx else ctx)
 
     if not settings.google_api_key:
         if is_greeting:
-            answer = (
-                "Hello! I am FinSort Copilot, your Utho Cloud FinOps and infrastructure assistant. "
-                "How can I assist you today? You can ask me to run What-If cost simulations, audit VMs, "
-                "review 30/60/90-day forecasts, or inspect rightsizing recommendations."
-            )
+            answer = "Hello! I am FinSort Copilot. How can I help you today?"
         else:
             answer = synth_ans if is_full_fleet_ctx else _fallback_chat_answer(ctx, gemini_configured=False, message=message)
         if cid not in _IN_MEMORY_CONVERSATIONS:
@@ -144,13 +151,14 @@ def chat(
     if is_greeting:
         system_instruction = (
             "You are FinSort Copilot, the AI FinOps and cloud infrastructure intelligence assistant for Utho Cloud. "
-            "The user is saying hello or making casual conversation. Respond warmly, naturally, conversationally, and concisely "
-            "(1 to 2 sentences) like a friendly human engineer. Do NOT dump the 85-resource fleet overview, do NOT cite unsolicited metrics or tables. "
-            "Welcome them and briefly offer your help with fleet optimization, What-If cost simulations, or infrastructure audits."
+            "The user is saying hello or making casual conversation. Respond naturally, casually, warmly, and concisely "
+            "(1 short sentence, e.g. 'Hello! How can I help you today?' or 'Hi there! What can I help you optimize today?'). "
+            "Do NOT dump the 85-resource fleet overview, do NOT cite unsolicited metrics, tables, or rupee amounts. "
+            "Do NOT recite a canned list of features or menu options."
         )
         full_prompt = (
             f"USER GREETING: {message}\n\n"
-            f"Respond warmly and conversationally as FinSort Copilot.{history_block}"
+            f"Respond warmly and naturally as FinSort Copilot.{history_block}"
         )
     else:
         system_instruction = (
@@ -187,11 +195,7 @@ def chat(
     except Exception as exc:
         print(f"[FinSort Copilot] Gemini call failed, using fallback: {exc}")
         if is_greeting:
-            answer = (
-                "Hello! I am FinSort Copilot, your Utho Cloud FinOps and infrastructure assistant. "
-                "How can I assist you today? You can ask me to run What-If cost simulations, audit VMs, "
-                "review 30/60/90-day forecasts, or inspect rightsizing recommendations."
-            )
+            answer = "Hello! I am FinSort Copilot. How can I help you today?"
         else:
             answer = synth_ans if is_full_fleet_ctx else _fallback_chat_answer(ctx, gemini_configured=True, message=message)
 
