@@ -1,0 +1,11 @@
+{
+  "aggregation_hours": 4,
+  "prediction_hours": 24,
+  "encoder_hours": 168,
+  "origin": "2026-09-25T00:00:00",
+  "resource_count": 908,
+  "targets": {
+    "cpu": "cpu_utilization_pct",
+    "memory": "memory_utilization_pct"
+  }
+}

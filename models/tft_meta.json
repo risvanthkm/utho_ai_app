@@ -1,0 +1,24 @@
+{
+  "name": "QuantileTemporalTransformer-90d",
+  "trained_at": "2026-10-25T12:16:30.970764+00:00",
+  "device": "cpu",
+  "gpu_name": "CPU",
+  "in_features": 4,
+  "hidden_dim": 48,
+  "n_heads": 4,
+  "epochs_run": 20,
+  "training_seconds": 23.31,
+  "val_mae": 0.5722,
+  "baseline_mae": 0.8715,
+  "data_source": "telemetry_parquet",
+  "encoder_days": 14,
+  "prediction_days": 90,
+  "horizons": [
+    30,
+    35,
+    40,
+    60,
+    90
+  ],
+  "is_trained": true
+}

@@ -9,7 +9,11 @@ __pycache__/
 datasets/raw/telemetry.parquet
 datasets/generated/*
 !datasets/generated/.gitkeep
-models/*
+
+# Track trained TFT model checkpoints and metadata
+!models/tft.ckpt
+!models/tft_meta.json
+!models/tft/**
 !models/.gitkeep
 
 # Runtime logs and generated files
