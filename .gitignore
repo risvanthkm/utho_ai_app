@@ -5,19 +5,9 @@ __pycache__/
 .env
 *.py[cod]
 
-# Generated telemetry and model artifacts
-datasets/raw/telemetry.parquet
-datasets/generated/*
-!datasets/generated/.gitkeep
-
-# Track trained TFT model checkpoints and metadata
-!models/tft.ckpt
-!models/tft_meta.json
-!models/tft/**
-!models/.gitkeep
-
 # Runtime logs and generated files
 *.log
 lightning_logs/
 forecast_output/
 outputs/
+.idea/
