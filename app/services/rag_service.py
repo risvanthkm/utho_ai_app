@@ -12,11 +12,15 @@ from pydantic import BaseModel, Field
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 RAG_CACHE_PATH = PROJECT_ROOT / "data" / "rag_index.json"
-DEFAULT_GEMINI_MODEL = os.getenv("GOOGLE_MODEL", "gemini-2.5-flash")
+DEFAULT_GEMINI_MODEL = os.getenv("GOOGLE_MODEL", "gemini-3.8-flash")
 
 _LAST_WORKING_MODEL: str | None = None
 
 RELIABLE_GEMINI_MODELS = (
+    "gemini-3.8-flash",
+    "gemini-3.5-flash-lite",
+    "gemini-3.1-pro-preview",
+    "gemini-flash-latest",
     "gemini-2.5-flash",
     "gemini-2.0-flash",
     "gemini-1.5-flash",
@@ -24,7 +28,6 @@ RELIABLE_GEMINI_MODELS = (
     "gemini-2.0-flash-lite",
     "gemini-2.5-pro",
     "gemini-1.5-pro",
-    "gemini-flash-latest",
 )
 
 _rag_chunks: list[dict[str, Any]] = []
