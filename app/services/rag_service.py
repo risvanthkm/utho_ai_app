@@ -33,13 +33,13 @@ class ScenarioStructuredOutput(BaseModel):
 
 def _get_gemini_client(api_key: str | None = None):
     key = (api_key or os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY") or "").strip()
-    if not key or key.startswith("AQ."):
+    if not key:
         return None
     try:
         from google import genai
         return genai.Client(api_key=key)
     except Exception as exc:
-        print(f"Gemini client initialization warning: {exc}")
+        print(f"[FinSort Copilot] Gemini client initialization warning: {exc}")
         return None
 
 
@@ -69,6 +69,9 @@ def call_gemini_text(prompt: str, system_instruction: str | None = None, model: 
                     return str(text).strip()
             except Exception as exc:
                 last_exc = exc
+                err_str = str(exc)
+                if "401" in err_str or "UNAUTHENTICATED" in err_str or "ACCESS_TOKEN_TYPE_UNSUPPORTED" in err_str:
+                    break
 
         # 2. Standard generate_content API
         try:
@@ -78,6 +81,9 @@ def call_gemini_text(prompt: str, system_instruction: str | None = None, model: 
                 return resp.text.strip()
         except Exception as exc:
             last_exc = exc
+            err_str = str(exc)
+            if "401" in err_str or "UNAUTHENTICATED" in err_str or "ACCESS_TOKEN_TYPE_UNSUPPORTED" in err_str:
+                break
 
     raise RuntimeError(f"Gemini generation failed: {last_exc}") from last_exc
 
@@ -429,6 +435,52 @@ def synthesize_from_full_context_with_telemetry(message: str, ctx: dict[str, Any
     tot_sav = float(fleet.get("total_potential_monthly_savings_inr") or (acc_sav + pend_sav) or 277230)
     proj_spend = float(fleet.get("projected_monthly_spend_after_accepted_inr") or max(0.0, cur_spend - acc_sav))
 
+    clean_words = set(re.findall(r"\b[a-z0-9_\-]+\b", q))
+
+    # 0. Conversational & Identity Intents
+    greetings = {"hi", "hello", "hey", "hola", "yo", "good morning", "good afternoon", "good evening", "howdy"}
+    if q in greetings or (len(clean_words) <= 2 and clean_words & greetings):
+        ans = (
+            "Hello! I am FinSort Copilot, your AI cloud infrastructure and FinOps intelligence assistant for Utho Cloud.\n"
+            f"I actively monitor 85 enterprise resources across Mumbai, Noida, and Bangalore—tracking ₹{cur_spend:,.0f}/mo in compute/storage run-rate, "
+            f"₹{acc_sav:,.0f}/mo in approved savings, 3 active SRE anomaly alerts, and 90-day TFT forecasts.\n\n"
+            "Here are a few questions you can ask me:\n"
+            "• 'What if we hibernate dev VMs in Bangalore from 8 PM to 8 AM?'\n"
+            "• 'Why did our SaaS cloud bill grow 40% in six months?'\n"
+            "• 'Audit ALT-001 memory leak and show remediation CLI.'\n"
+            "• 'Show top peak-safe rightsizing candidates with p99 < 85%.'\n"
+            "• 'Which team is spending the most money?'"
+        )
+        return ans, {
+            "copilot_status": "online",
+            "monitored_resources": len(resources) or 85,
+            "current_monthly_spend_inr": cur_spend,
+            "approved_monthly_savings_inr": acc_sav,
+            "total_savings_potential_inr": tot_sav,
+        }
+
+    if any(k in q for k in ("who are you", "what can you do", "help me", "your capabilities", "introduce yourself")):
+        ans = (
+            "I am FinSort Copilot, an AI-powered FinOps & SRE platform assistant built for Utho Cloud infrastructure.\n"
+            "My primary capabilities include:\n"
+            "1. Peak-Safety Rightsizing: Enforces the mathematical governor (Projected p95 ≤ 75% & p99 < 85%) to downsize over-provisioned VMs without latency risk.\n"
+            "2. What-If Scenario Simulations: Simulates off-hours hibernation, regional migrations, and storage cleanup with live rupee savings.\n"
+            "3. SRE Anomaly Correlation: Detects memory leaks (ALT-001), orphaned test clusters (ALT-002), and linear disk exhaustion (ALT-003) before outages occur.\n"
+            "4. Multi-Horizon TFT Forecasting: 30/60/90-day quantile spend projections using PyTorch Temporal Fusion Transformers (Val MAE 0.5722).\n"
+            "5. Automated Remediation: Generates copy-ready Terraform HCL and Utho CLI commands with snapshot protection."
+        )
+        return ans, {
+            "supported_regions": ["in-mumbai-1", "in-noida-1", "in-bangalore-1"],
+            "governor_threshold": "p95 <= 75%, p99 < 85%",
+            "forecast_model": "QuantileTemporalTransformer-90d",
+        }
+
+    if any(k in q for k in ("thank you", "thanks", "awesome", "perfect", "good job", "nice")):
+        return (
+            "You're very welcome! Let me know whenever you need more resource audits, Terraform manifests, or What-If cost simulations.",
+            {"status": "ready"},
+        )
+
     # 1. Specific resource ID or name lookup (full ID, full name, or distinctive name token)
     for r in resources:
         rid = str(r.get("id") or r.get("resource_id") or "").lower()
@@ -436,7 +488,7 @@ def synthesize_from_full_context_with_telemetry(message: str, ctx: dict[str, Any
         name_match = bool(rname and len(rname) > 4 and rname in q)
         if not name_match and rname:
             # Also match distinctive slug parts like 'orderworker', 'webhook-01', 'search-indexer-04', 'wal-volume', 'recon-batch'
-            for slug in ("orderworker", "payment-webhook", "checkout-gateway", "order-capture", "upi-switch", "search-indexer", "wal-volume", "recon-batch"):
+            for slug in ("orderworker", "payment-webhook", "checkout-gateway", "order-capture", "upi-switch", "search-indexer", "wal-volume", "recon-batch", "loadtest"):
                 if slug in q and slug in rname:
                     name_match = True
                     break
@@ -562,62 +614,62 @@ def synthesize_from_full_context_with_telemetry(message: str, ctx: dict[str, Any
         }
 
     # 3. What-If / Hibernation / Off-Hours / Shutdown / Schedule simulation questions
-    if any(k in q for k in ("what if", "what-if", "hibernate", "shut down", "shutdown", "off-hours", "off hours", "8 pm", "8pm", "weekend", "schedule", "night")):
-        target_reg = "in-bangalore-1" if "bangalore" in q or "blr" in q else ("in-noida-1" if "noida" in q else ("in-mumbai-1" if "mumbai" in q else None))
-        target_env = "dev" if ("dev" in q and "staging" not in q) else ("staging" if ("staging" in q and "dev" not in q) else None)
+    if any(k in q for k in ("what if", "what-if", "hibernate", "hibernation", "shut down", "shutdown", "off-hours", "off hours", "8 pm", "8pm", "weekend", "schedule", "night", "power off")):
+        target_reg = "in-bangalore-1" if ("bangalore" in q or "blr" in q) else ("in-noida-1" if "noida" in q else ("in-mumbai-1" if "mumbai" in q else None))
+        target_env = "dev" if ("dev" in q and "staging" not in q and "prod" not in q) else ("staging" if ("staging" in q and "dev" not in q and "prod" not in q) else ("prod" if "prod" in q else None))
 
-        sched_recs = [
-            rc for rc in recs
-            if str(rc.get("action_type") or rc.get("action_title") or "").upper().startswith("SCHEDULE")
+        # Filter matching VMs from the live 85-resource fleet
+        scoped_vms = [
+            r for r in resources
+            if r.get("type") == "vm"
+            and (not target_reg or r.get("region") == target_reg)
+            and (not target_env or str(r.get("env") or r.get("environment") or "").lower() == target_env)
         ]
-        scoped_recs = [
-            rc for rc in sched_recs
-            if (not target_reg or rc.get("region") == target_reg)
-            and (not target_env or str(rc.get("env", "")).lower() == target_env)
-        ]
-        if not scoped_recs and target_env:
-            # Also check resources directly in that region/env
+
+        if not scoped_vms and not target_env:
+            # Fallback to dev + staging VMs
             scoped_vms = [
                 r for r in resources
                 if r.get("type") == "vm"
+                and str(r.get("env") or r.get("environment") or "").lower() in ("dev", "staging")
                 and (not target_reg or r.get("region") == target_reg)
-                and (not target_env or str(r.get("env", "")).lower() == target_env)
             ]
+
+        # Calculate exact hours offline
+        if "weekend" in q and ("8 pm" not in q and "night" not in q):
+            hours_per_week = 48
+        elif "night" in q and "weekend" not in q:
+            hours_per_week = 60
         else:
-            scoped_ids = {rc.get("resource_id") for rc in scoped_recs}
-            scoped_vms = [r for r in resources if (r.get("id") or r.get("resource_id")) in scoped_ids]
+            # Default or 8 PM to 8 AM (12h/day * 5 days + 48h weekend) = 108 to 118 hrs/week
+            hours_per_week = 118
 
-        if not scoped_vms:
-            scoped_vms = [
-                r for r in resources
-                if r.get("type") == "vm"
-                and str(r.get("optimization_status", "")) == "IDLE_SCHEDULE_CANDIDATE"
-                and (not target_reg or r.get("region") == target_reg)
-            ]
-
-        hours_per_week = 118 if ("weekend" in q or "8 pm" in q or "8pm" in q or "hibernate" in q) else 84
         reduction_ratio = round(hours_per_week / 168.0, 4)
         current_scope_spend = sum(float(r.get("monthly_cost_inr", 0)) for r in scoped_vms)
-        if scoped_recs:
-            monthly_sav = sum(float(rc.get("monthly_savings_inr", 0)) for rc in scoped_recs)
-        else:
-            monthly_sav = round(current_scope_spend * reduction_ratio)
+        monthly_sav = round(current_scope_spend * reduction_ratio)
         after_spend = max(0.0, current_scope_spend - monthly_sav)
 
-        scope_label = f"{target_env.upper() if target_env else 'Non-Prod & Batch'} VMs in {target_reg or 'All Utho Regions (Noida, Bangalore, Mumbai)'}"
+        scope_label = f"{target_env.upper() if target_env else 'Non-Production'} VMs in {target_reg or 'All Regions'}"
         sample_nodes = [
-            f"  - [{r.get('id') or r.get('resource_id')}] {r.get('name')} ({r.get('plan')}, {r.get('region')}, {r.get('env')}): ₹{float(r.get('monthly_cost_inr', 0)):,.0f}/mo -> Saves ~₹{float(r.get('monthly_cost_inr', 0)) * 0.65:,.0f}/mo"
-            for r in scoped_vms[:5]
+            f"  - [{r.get('id') or r.get('resource_id')}] {r.get('name')} ({r.get('plan')}, {r.get('region')}, {r.get('env')}): ₹{float(r.get('monthly_cost_inr', 0)):,.0f}/mo -> Saves ~₹{float(r.get('monthly_cost_inr', 0)) * reduction_ratio:,.0f}/mo"
+            for r in scoped_vms[:6]
         ]
-        sample_block = "\n".join(sample_nodes)
+        sample_block = "\n".join(sample_nodes) if sample_nodes else "  No matching VMs found in this scope."
+
+        prod_safety = (
+            "• SLA & Peak Safety: 0% production impact — all 10 `PROTECTED_PEAK_LOAD` production VMs remain 100% online."
+            if target_env != "prod" else
+            "• CAUTION: Hibernating production instances will directly impact customer SLAs and checkout availability!"
+        )
+
         ans = (
             f"What-If Hibernation Simulation — {scope_label}:\n"
-            f"• Schedule Policy: Power off 20:00–08:00 IST weeknights + weekend hibernation ({hours_per_week} of 168 hrs/week offline = {reduction_ratio*100:.1f}% compute hour reduction).\n"
+            f"• Schedule Policy: Power off 20:00–08:00 IST weeknights + full weekends ({hours_per_week} of 168 hrs/week offline = {reduction_ratio*100:.1f}% compute reduction).\n"
             f"• Matching Fleet Scope: {len(scoped_vms)} VMs currently costing ₹{current_scope_spend:,.0f}/mo.\n"
-            f"• Before vs. After (Scope): ₹{current_scope_spend:,.0f}/mo -> ₹{after_spend:,.0f}/mo.\n"
+            f"• Spend Impact: ₹{current_scope_spend:,.0f}/mo -> ₹{after_spend:,.0f}/mo.\n"
             f"• Estimated Savings: ₹{monthly_sav:,.0f}/mo (₹{monthly_sav * 12:,.0f}/yr).\n"
-            f"• SLA & Peak Safety: 0% production impact — all 10 `PROTECTED_PEAK_LOAD` production VMs remain 100% online.\n"
-            f"Matching Target VMs (Top {min(5, len(scoped_vms))} of {len(scoped_vms)}):\n{sample_block}\n"
+            f"{prod_safety}\n"
+            f"Target VMs in Scope ({len(scoped_vms)} Total):\n{sample_block}\n"
             f"• Automation CLI: `utho vm schedule-power --env {target_env or 'dev,staging'} {'--region ' + target_reg if target_reg else ''} --stop '20:00' --start '08:00' --tz IST`"
         )
         return ans, {
@@ -630,8 +682,59 @@ def synthesize_from_full_context_with_telemetry(message: str, ctx: dict[str, Any
             "estimated_annual_savings_inr": monthly_sav * 12,
         }
 
-    # 4. Why did our SaaS cloud bill grow 40% in six months? / Root-cause breakdown
-    if any(k in q for k in ("40%", "grow", "six months", "6 months", "why did", "root cause", "quiet tax", "went up", "increase")):
+    # 4. Team / Department Cost & Waste Breakdown
+    if any(k in q for k in ("team", "department", "payments-core", "auth-platform", "search-indexing", "data-pipeline", "frontend-web", "qa-automation", "who spends")):
+        team_stats: dict[str, dict[str, float]] = {}
+        for r in resources:
+            tm = str(r.get("team") or "platform").lower()
+            team_stats.setdefault(tm, {"count": 0, "spend": 0.0, "waste": 0.0})
+            team_stats[tm]["count"] += 1
+            team_stats[tm]["spend"] += float(r.get("monthly_cost_inr", 0))
+
+        for rc in recs:
+            tm = str(rc.get("team") or "platform").lower()
+            if tm in team_stats:
+                team_stats[tm]["waste"] += float(rc.get("monthly_savings_inr", 0))
+
+        specific_team = next((t for t in ("payments-core", "auth-platform", "search-indexing", "data-pipeline", "frontend-web", "qa-automation") if t in q or t.split("-")[0] in q), None)
+        if specific_team and specific_team in team_stats:
+            st = team_stats[specific_team]
+            matching_recs = [rc for rc in recs if str(rc.get("team", "")).lower() == specific_team]
+            top_rec = matching_recs[0] if matching_recs else None
+            rec_line = f"\n• Top Recommendation: {top_rec.get('action_title') or top_rec.get('action_type')} ({top_rec.get('current_spec')} -> {top_rec.get('recommended_spec')}) saves ₹{float(top_rec.get('monthly_savings_inr', 0)):,.0f}/mo." if top_rec else ""
+            ans = (
+                f"Team Spend & Waste Audit — {specific_team.upper()}:\n"
+                f"• Resources in Scope: {int(st['count'])} assets\n"
+                f"• Current Monthly Spend: ₹{st['spend']:,.0f}/mo\n"
+                f"• Identified Monthly Waste: ₹{st['waste']:,.0f}/mo ({len(matching_recs)} recommendations)\n"
+                f"• Projected Optimized Spend: ₹{max(0.0, st['spend'] - st['waste']):,.0f}/mo{rec_line}"
+            )
+            return ans, {
+                "team": specific_team,
+                "resource_count": int(st["count"]),
+                "monthly_spend_inr": st["spend"],
+                "identified_waste_inr": st["waste"],
+            }
+
+        sorted_teams = sorted(team_stats.items(), key=lambda x: x[1]["spend"], reverse=True)
+        lines = [
+            f"• {tm.upper()}: ₹{st['spend']:,.0f}/mo ({int(st['count'])} resources | ₹{st['waste']:,.0f}/mo recoverable waste)"
+            for tm, st in sorted_teams
+        ]
+        top_team = sorted_teams[0][0].upper() if sorted_teams else "N/A"
+        ans = (
+            f"FinSort Fleet Spend & Waste Breakdown by Team ({len(team_stats)} Teams):\n"
+            + "\n".join(lines)
+            + f"\n\nTop Spending Team: {top_team} leads fleet consumption. Implementing FinSort recommendations reduces overall spend from ₹{cur_spend:,.0f}/mo to ₹{proj_spend:,.0f}/mo."
+        )
+        return ans, {
+            "top_spending_team": top_team,
+            "total_teams_count": len(team_stats),
+            "fleet_spend_inr": cur_spend,
+        }
+
+    # 5. Why did our SaaS cloud bill grow 40% in six months? / Root-cause breakdown
+    if any(k in q for k in ("40%", "grow", "six months", "6 months", "why did", "root cause", "quiet tax", "went up", "increase", "bill increase")):
         rightsize_recs = [rc for rc in recs if str(rc.get("action_type", "")).upper() == "RIGHTSIZE_VM"]
         sched_recs = [rc for rc in recs if str(rc.get("action_type", "")).upper() == "SCHEDULE_OFF_HOURS"]
         orphan_recs = [rc for rc in recs if str(rc.get("action_type", "")).upper() == "CLEANUP_ORPHAN"]
@@ -660,7 +763,7 @@ def synthesize_from_full_context_with_telemetry(message: str, ctx: dict[str, Any
             "total_monthly_savings_potential_inr": tot_sav,
         }
 
-    # 5. Orphaned Storage Volumes & Unused Public IPs questions
+    # 6. Orphaned Storage Volumes & Unused Public IPs questions
     if any(k in q for k in ("storage", "volume", "disk", "ssd", "ip", "ipv4", "orphan", "unattached", "floating")):
         vols = [r for r in resources if r.get("type") in ("volume", "block_volume")]
         ips = [r for r in resources if r.get("type") in ("ip", "public_ip")]
@@ -692,7 +795,7 @@ def synthesize_from_full_context_with_telemetry(message: str, ctx: dict[str, Any
             "total_orphan_cleanup_savings_inr": vol_spend + ip_spend,
         }
 
-    # 6. Zombie / Dead / Idle VMs questions
+    # 7. Zombie / Dead / Idle VMs questions
     if any(k in q for k in ("zombie", "dead", "abandoned", "terminate")):
         zombies = [r for r in resources if str(r.get("optimization_status", "")).upper() == "ZOMBIE"]
         z_spend = sum(float(z.get("monthly_cost_inr", 0)) for z in zombies)
@@ -713,7 +816,7 @@ def synthesize_from_full_context_with_telemetry(message: str, ctx: dict[str, Any
             "recommended_action": "Snapshot + Terminate (TERMINATE_ZOMBIE)",
         }
 
-    # 7. Protected Peak-Load VMs (`PROTECTED_PEAK_LOAD`) questions
+    # 8. Protected Peak-Load VMs (`PROTECTED_PEAK_LOAD`) questions
     if any(k in q for k in ("protected", "peak load", "peak-load", "bursty", "cannot downsize", "locked", "governor")) and "top" not in q and "candidate" not in q:
         prot = [r for r in resources if str(r.get("optimization_status", "")).upper() == "PROTECTED_PEAK_LOAD"]
         p_spend = sum(float(p.get("monthly_cost_inr", 0)) for p in prot)
@@ -735,7 +838,7 @@ def synthesize_from_full_context_with_telemetry(message: str, ctx: dict[str, Any
             "p99_ceiling_pct": 85.0,
         }
 
-    # 8. Rightsizing Candidates / Top N Candidates / Projected p99 < 85%
+    # 9. Rightsizing Candidates / Top N Candidates / Projected p99 < 85%
     if any(k in q for k in ("rightsiz", "downsize", "candidate", "top ", "p99", "p95", "overprovision", "over-provision")):
         num_match = re.search(r"top\s+(\d+)", q)
         top_n = min(max(int(num_match.group(1)), 1), 10) if num_match else 5
@@ -770,7 +873,7 @@ def synthesize_from_full_context_with_telemetry(message: str, ctx: dict[str, Any
             "protected_peak_vms_locked": 10,
         }
 
-    # 9. Forecast / TFT / P10 / P50 / P90 / 30d / 60d / 90d / MAE questions
+    # 10. Forecast / TFT / P10 / P50 / P90 / 30d / 60d / 90d / MAE questions
     if any(k in q for k in ("forecast", "tft", "p10", "p50", "p90", "quantile", "30 day", "60 day", "90 day", "30d", "60d", "90d", "mae", "predict")):
         eff_sav = acc_sav if acc_sav > 0 else tot_sav
         eff_proj = max(0.0, cur_spend - eff_sav)
@@ -794,14 +897,12 @@ def synthesize_from_full_context_with_telemetry(message: str, ctx: dict[str, Any
             "forecast_90d_optimized_p50_inr": o90,
         }
 
-    # 10. Region / Environment / Team filtered queries
+    # 11. Region / Environment filtered queries
     reg_filter = "in-bangalore-1" if ("bangalore" in q or "blr" in q) else ("in-noida-1" if "noida" in q else ("in-mumbai-1" if "mumbai" in q else None))
     env_filter = "prod" if ("prod" in q and "staging" not in q and "dev" not in q) else ("staging" if ("staging" in q and "prod" not in q) else ("dev" if ("dev" in q and "prod" not in q) else None))
-    team_filter = next((t for t in ("payments-core", "auth-platform", "search-indexing", "data-pipeline", "frontend-web", "qa-automation") if t in q or t.split("-")[0] in q), None)
 
-    if reg_filter or env_filter or team_filter or "region" in q or "environment" in q or "team" in q:
-        if not reg_filter and not env_filter and not team_filter:
-            # Breakdown across all regions & environments
+    if reg_filter or env_filter or "region" in q or "environment" in q:
+        if not reg_filter and not env_filter:
             reg_stats: dict[str, dict[str, float]] = {}
             for r in resources:
                 rg = str(r.get("region", "in-mumbai-1"))
@@ -813,7 +914,7 @@ def synthesize_from_full_context_with_telemetry(message: str, ctx: dict[str, Any
                 for rg, st in sorted(reg_stats.items())
             ]
             ans = (
-                "FinSort Regional & Environment Spend Breakdown (85 Utho Cloud Resources):\n"
+                "FinSort Regional Spend Breakdown (85 Utho Cloud Resources):\n"
                 + "\n".join(reg_lines)
                 + f"\n• Total Fleet Spend: ₹{cur_spend:,.0f}/mo | Approved Savings: ₹{acc_sav:,.0f}/mo | Projected Spend: ₹{proj_spend:,.0f}/mo."
             )
@@ -828,13 +929,12 @@ def synthesize_from_full_context_with_telemetry(message: str, ctx: dict[str, Any
             r for r in resources
             if (not reg_filter or r.get("region") == reg_filter)
             and (not env_filter or str(r.get("env") or r.get("environment") or "").lower() == env_filter)
-            and (not team_filter or str(r.get("team") or "").lower() == team_filter)
         ]
         filtered_ids = {r.get("id") or r.get("resource_id") for r in filtered_res}
         filtered_recs = [rc for rc in recs if rc.get("resource_id") in filtered_ids]
         f_spend = sum(float(r.get("monthly_cost_inr", 0)) for r in filtered_res)
         f_sav = sum(float(rc.get("monthly_savings_inr", 0)) for rc in filtered_recs)
-        scope_parts = [p for p in (reg_filter, env_filter, team_filter) if p]
+        scope_parts = [p for p in (reg_filter, env_filter) if p]
         scope_str = " · ".join(scope_parts)
         node_lines = [
             f"  - [{r.get('id') or r.get('resource_id')}] {r.get('name')} ({r.get('type')} · {r.get('plan')}): ₹{float(r.get('monthly_cost_inr', 0)):,.0f}/mo [{r.get('optimization_status')}]"
@@ -856,7 +956,7 @@ def synthesize_from_full_context_with_telemetry(message: str, ctx: dict[str, Any
             "scope_recommendations_count": len(filtered_recs),
         }
 
-    # 11. Terraform / CLI / Pricing Catalog questions
+    # 12. Terraform / CLI / Pricing Catalog questions
     if any(k in q for k in ("terraform", "hcl", "iac", "cli", "pricing", "catalog", "tariff", "rate")):
         ans = (
             "Utho Cloud INR Pricing Catalog & Terraform Remediation Reference:\n"
@@ -872,21 +972,20 @@ def synthesize_from_full_context_with_telemetry(message: str, ctx: dict[str, Any
             "r16_2xlarge_monthly_inr": 22400,
         }
 
-    # 12. Approved / Accepted vs Pending / Savings / Summary questions (and default live overview)
+    # 13. Dynamic General/Roadmap Response (answering how to optimize, what to do, etc.)
     top_recs = sorted(recs, key=lambda x: float(x.get("monthly_savings_inr", 0)), reverse=True)[:5]
     top_lines = [
-        f"  - [{rc.get('resource_id')}] {rc.get('resource_name')}: {rc.get('action_title') or rc.get('action_type')} ({rc.get('current_spec') or rc.get('current_config')} -> {rc.get('recommended_spec') or rc.get('recommended_config')}) saves ₹{float(rc.get('monthly_savings_inr', 0)):,.0f}/mo [{str(rc.get('status', 'pending')).upper()}]"
+        f"  - [{rc.get('resource_id')}] {rc.get('resource_name')}: {rc.get('action_title') or rc.get('action_type')} saves ₹{float(rc.get('monthly_savings_inr', 0)):,.0f}/mo ({rc.get('current_spec') or rc.get('current_config')} -> {rc.get('recommended_spec') or rc.get('recommended_config')})"
         for rc in top_recs
     ]
     ans = (
-        f"FinSort Live Fleet & Savings Summary (85 Utho Cloud Resources):\n"
-        f"• Current Monthly Spend (Before): ₹{cur_spend:,.0f}/mo\n"
-        f"• Projected Monthly Spend (After Approved): ₹{proj_spend:,.0f}/mo\n"
-        f"• Approved (Accepted) Savings: ₹{acc_sav:,.0f}/mo ({len(acc_recs)} recommendations accepted)\n"
-        f"• Pending Approval Savings: ₹{pend_sav:,.0f}/mo ({len(pend_recs)} recommendations pending)\n"
-        f"• Total Potential Savings: ₹{tot_sav:,.0f}/mo (₹{tot_sav * 12:,.0f}/yr)\n"
-        f"• Peak-Safety Protection: 10 bursty VMs (`PROTECTED_PEAK_LOAD`, p99 ≥ 85%) locked against downsizing.\n"
-        f"Top 5 Recommendations by Monthly Savings:\n" + "\n".join(top_lines)
+        f"FinSort Strategic Fleet Optimization Roadmap (85 Utho Cloud Resources):\n"
+        f"• Financial Baseline: Current run-rate ₹{cur_spend:,.0f}/mo -> Optimized ₹{proj_spend:,.0f}/mo (saving ₹{acc_sav:,.0f}/mo approved, ₹{tot_sav:,.0f}/mo full potential).\n"
+        f"• 3-Step Execution Priority:\n"
+        f"  1. Zero-Risk Cleanups: Purge 12 orphaned Block SSDs (₹45,200/mo) and release 8 unused floating IPs (₹2,800/mo).\n"
+        f"  2. Automated Off-Hours: Hibernate 22 dev/staging VMs (20:00–08:00 IST + weekends) saving ₹78,400/mo with zero SLA impact.\n"
+        f"  3. Peak-Safe Rightsizing: Resize 20 steady over-provisioned VMs saving ₹1,50,310/mo, while shielding 10 bursty peak VMs (`PROTECTED_PEAK_LOAD`).\n"
+        f"Top 5 High-Impact Actions:\n" + "\n".join(top_lines)
     )
     return ans, {
         "total_resources": len(resources) or 85,
@@ -894,8 +993,7 @@ def synthesize_from_full_context_with_telemetry(message: str, ctx: dict[str, Any
         "projected_monthly_spend_inr": proj_spend,
         "approved_monthly_savings_inr": acc_sav,
         "pending_monthly_savings_inr": pend_sav,
-        "approved_recommendations_count": len(acc_recs),
-        "pending_recommendations_count": len(pend_recs),
+        "total_savings_potential_inr": tot_sav,
     }
 
 
