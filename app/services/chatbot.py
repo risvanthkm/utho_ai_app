@@ -11,10 +11,11 @@ from app.services.dashboard import resource_history
 _IN_MEMORY_CONVERSATIONS: dict[str, list[dict[str, Any]]] = {}
 
 
-def _gemini_request(settings: Settings, prompt: str) -> str:
+def _gemini_request(settings: Settings, prompt: str, system_instruction: str | None = None) -> str:
     from app.services.rag_service import call_gemini_text
     return call_gemini_text(
         prompt=prompt,
+        system_instruction=system_instruction,
         model=settings.google_model or "gemini-3.8-flash",
         api_key=settings.google_api_key,
     )
@@ -120,17 +121,37 @@ def chat(
         recent = history[-6:]
         history_block = " Recent conversation: " + json.dumps(recent)
 
+    system_instruction = (
+        "You are FinSort Copilot, the senior AI FinOps and SRE infrastructure intelligence platform assistant for Utho Cloud "
+        "(Mumbai in-mumbai-1, Noida in-noida-1, Bangalore in-bangalore-1).\n\n"
+        "CORE RULES:\n"
+        "1. DIRECT ANSWER MANDATE: Answer the user's specific question or request directly, thoroughly, and analytically. "
+        "DO NOT output an unsolicited general fleet overview or repeat dashboard summaries unless the user specifically asks for a fleet overview or summary.\n"
+        "2. WHAT-IF & SCENARIO SIMULATIONS: When asked about hibernating or scheduling off-hours for VMs (e.g. dev VMs in Bangalore from 8 PM to 8 AM, shutting down on weekends):\n"
+        "   - Calculate the exact hours offline: 8 PM to 8 AM weeknights = 12h/day * 5 days = 60h, plus 48h weekends = 108 to 118 hrs offline per week (~70.2% compute reduction).\n"
+        "   - Scope matching VMs in the fleet context (filtering by region and environment, e.g., dev VMs in in-bangalore-1).\n"
+        "   - Compute the rupee savings: Current Scope Spend * Reduction Ratio.\n"
+        "   - Confirm 0% production SLA risk because all 10 PROTECTED_PEAK_LOAD production VMs remain running.\n"
+        "   - Provide the specific Utho CLI schedule command: `utho vm schedule-power --env <env> --region <region> --stop '20:00' --start '08:00' --tz IST`.\n"
+        "3. COST SAVINGS ROADMAP: When asked how to save money or what actions to take, provide a prioritized 3-step execution plan citing exact numbers and top recommendations from the context.\n"
+        "4. SRE ANOMALIES & TTF: For alerts (ALT-001, ALT-002, ALT-003), explain the telemetry root cause, time-to-failure (TTF), and provide copy-ready mitigation commands.\n"
+        "5. TEAM & ATTRIBUTION: Break down spend and recoverable waste by engineering team.\n"
+        "6. ACCURACY: Cite exact resource IDs, regions, plans, and INR (₹) amounts from the context. Be conversational, intelligent, and technically authoritative."
+    )
+
     full_prompt = (
+        f"USER QUESTION: {message}\n\n"
         "You are FinSort Copilot, a conversational FinOps and SRE assistant for Utho Cloud (Mumbai, Noida, Bangalore). "
         "Answer the newest user question directly; do not classify it, select a tool, or ask another system "
         "to route it. Use the complete fleet data (all VMs, block volumes, public IPs, approved/accepted vs pending "
         "recommendations, INR savings, 30/60/90d TFT forecasts, and active alerts) in Context to give a specific, "
         f"accurate answer citing resource IDs and INR (₹) figures.{history_block} "
-        f"Context: {json.dumps(ctx)} Newest user question: {message}"
+        f"Context: {json.dumps(ctx)}\n\n"
+        f"CRITICAL REMINDER: Address the user question '{message}' directly with specific telemetry, calculations, and commands. Do NOT dump an unsolicited fleet summary."
     )
 
     try:
-        answer = _gemini_request(settings, full_prompt)
+        answer = _gemini_request(settings, full_prompt, system_instruction=system_instruction)
     except Exception:
         answer = synth_ans if is_full_fleet_ctx else _fallback_chat_answer(ctx, gemini_configured=True, message=message)
 
